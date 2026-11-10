@@ -2,7 +2,7 @@
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static LOG_FILE: OnceLock<Option<String>> = OnceLock::new();
@@ -27,7 +27,35 @@ pub fn trace(dir: &str, line: &str) {
     }
 }
 
+/// Warnings held back while claude's interface owns the terminal: written there, they would land in
+/// the middle of its screen. `None` while nothing is held.
+static HELD: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
 pub fn warn(message: &str) {
-    eprintln!("claudette: {message}");
     trace("warn", message);
+    stderr_line(&format!("claudette: {message}"));
+}
+
+/// Writes a line to stderr, or holds it with the warnings while claude's interface owns the terminal.
+pub fn stderr_line(line: &str) {
+    match HELD.lock().unwrap().as_mut() {
+        Some(held) => held.push(line.to_owned()),
+        None => eprintln!("{line}"),
+    }
+}
+
+/// Holds warnings until the returned guard is dropped, which writes them out.
+pub fn hold_warnings() -> HeldWarnings {
+    HELD.lock().unwrap().get_or_insert_with(Vec::new);
+    HeldWarnings
+}
+
+pub struct HeldWarnings;
+
+impl Drop for HeldWarnings {
+    fn drop(&mut self) {
+        for line in HELD.lock().unwrap().take().unwrap_or_default() {
+            eprintln!("{line}");
+        }
+    }
 }

@@ -303,6 +303,8 @@ impl Tunnel {
     /// otherwise stdin, stdout and stderr as streams. Returns the session's exit code.
     pub async fn attach_stdio(&self, mut output: Output, tty: bool) -> anyhow::Result<i32> {
         use tokio::signal::unix::{SignalKind, signal};
+        // Dropped after the terminal is restored (declared first), so held warnings print below the session.
+        let _held = tty.then(crate::log::hold_warnings);
         let _raw = tty.then(RawMode::enter).flatten();
         let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
         // Reading a terminal blocks: a thread, which ends with the process.
@@ -425,11 +427,15 @@ impl Connection {
             trace("spawn", &json!({ "bridge": argv }).to_string());
             // ssh's stderr is relayed rather than shared: a ControlMaster takes over the descriptors
             // of a client and keeps them until the remote command ends, a round trip after this
-            // process, which would hold the caller's stderr open that long.
+            // process, which would hold the caller's stderr open that long. Relayed by line, so that
+            // while claude's interface owns the terminal, ssh's messages wait with claudette's.
             let mut child = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
-            let errors = child.stderr.take().map(|mut stderr| {
+            let errors = child.stderr.take().map(|stderr| {
                 tokio::spawn(async move {
-                    let _ = tokio::io::copy(&mut stderr, &mut tokio::io::stderr()).await;
+                    let mut lines = BufReader::new(stderr).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        crate::log::stderr_line(&line);
+                    }
                 })
             });
             let mut reader = BufReader::new(child.stdout.take().expect("piped"));

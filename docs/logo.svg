@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="claudette: Claude's mascot floating like a balloon, tethered to a laptop">
+  <style>
+    .ink { fill: #2b2622; }
+    .line { stroke: #2b2622; }
+    .cloud { fill: #dfe5ec; }
+    .screen { fill: #2b2622; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #f3ece4; }
+      .line { stroke: #f3ece4; }
+      .cloud { fill: #3a4250; }
+      .screen { fill: #15130f; }
+    }
+  </style>
+
+  <!-- Clouds: claude is up there, on the remote machine. -->
+  <g class="cloud" shape-rendering="crispEdges">
+    <rect x="14" y="70" width="40" height="10" />
+    <rect x="24" y="60" width="20" height="10" />
+    <rect x="8" y="80" width="56" height="10" />
+    <rect x="198" y="112" width="36" height="10" />
+    <rect x="206" y="102" width="16" height="10" />
+    <rect x="192" y="122" width="52" height="10" />
+  </g>
+
+  <!-- The tether: ssh, from the mascot down to this machine. -->
+  <path class="line" d="M 128 112 C 104 138, 154 156, 128 186" fill="none" stroke-width="3" stroke-linecap="round" />
+
+  <!-- Clawd, wearing the bow that makes it a claudette. Pixel grid of 10. -->
+  <g transform="translate(68 36) scale(10)" shape-rendering="crispEdges">
+    <g fill="#d97757">
+      <rect x="2" y="1" width="8" height="5" />
+      <rect x="0" y="3" width="2" height="1" />
+      <rect x="10" y="3" width="2" height="1" />
+      <rect x="2" y="6" width="1" height="1.6" />
+      <rect x="4" y="6" width="1" height="1.6" />
+      <rect x="7" y="6" width="1" height="1.6" />
+      <rect x="9" y="6" width="1" height="1.6" />
+    </g>
+    <g fill="#1f1e1d">
+      <rect x="4" y="2" width="1" height="2" />
+      <rect x="7" y="2" width="1" height="2" />
+    </g>
+  </g>
+
+  <!-- The bow that makes it a claudette: a small one, pinned at the head's top corner. Grid of 3. -->
+  <g transform="translate(138 34) scale(3)" shape-rendering="crispEdges">
+    <!-- Loops. -->
+    <g fill="#f4a3b5">
+      <rect x="0" y="0" width="2" height="4" />
+      <rect x="7" y="0" width="2" height="4" />
+      <rect x="2" y="1" width="1" height="2" />
+      <rect x="6" y="1" width="1" height="2" />
+    </g>
+    <!-- Pinched toward the knot. -->
+    <g fill="#e07b95">
+      <rect x="3" y="1" width="1" height="2" />
+      <rect x="5" y="1" width="1" height="2" />
+    </g>
+    <!-- Knot and tails. -->
+    <g fill="#c94f6d">
+      <rect x="4" y="1" width="1" height="2" />
+      <rect x="3" y="3" width="1" height="2" />
+      <rect x="5" y="3" width="1" height="2" />
+    </g>
+  </g>
+
+  <!-- This machine: a laptop with a prompt, where the tools run. -->
+  <g shape-rendering="crispEdges">
+    <rect class="ink" x="88" y="186" width="80" height="52" rx="4" />
+    <rect class="screen" x="94" y="192" width="68" height="40" />
+    <rect x="102" y="204" width="6" height="6" fill="#d97757" />
+    <rect x="108" y="210" width="6" height="6" fill="#d97757" />
+    <rect x="102" y="216" width="6" height="6" fill="#d97757" />
+    <rect x="120" y="216" width="14" height="6" fill="#f3ece4" />
+    <rect class="ink" x="76" y="238" width="104" height="8" rx="3" />
+  </g>
+</svg>

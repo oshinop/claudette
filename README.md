@@ -1,4 +1,14 @@
-# claudette
+<p align="center"><img src="docs/logo.svg" alt="claudette: Claude's mascot with a small bow, floating above a laptop it is tethered to" width="200"></p>
+
+<h1 align="center">claudette</h1>
+
+<p align="center">
+  <a href="https://github.com/oshinop/claudette/actions/workflows/ci.yml"><img src="https://github.com/oshinop/claudette/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/oshinop/claudette/releases/latest"><img src="https://img.shields.io/github/v/release/oshinop/claudette?include_prereleases&sort=semver" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/oshinop/claudette" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="macOS and Linux">
+  <img src="https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust" alt="Rust 1.88 or later">
+</p>
 
 A drop-in `claude` that runs Claude Code on another machine, reached over ssh, and its tools on this
 one: your files, builds and git stay on the laptop, while the remote machine holds the login.

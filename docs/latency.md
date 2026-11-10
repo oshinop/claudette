@@ -1,15 +1,17 @@
 # Startup latency
 
+English · [简体中文](zh-CN/latency.md)
+
 A session starts with an ssh exchange, the mounts (the project, its sessions folder, your user content
 and plugins, the Claude Code folder) and claude's own startup. On a slow link each request claude
-waits on is a round trip to the laptop, one after another, so the design keeps claude from waiting on
-the laptop at all where it can:
+waits on is a round trip to the local machine, one after another, so the design keeps claude from waiting on
+the local machine at all where it can:
 
 - **The near end of each mount** (see [design](design.md#the-near-end-of-a-mount)). What claude reads
-  first from a mount comes with the run, answered from the laptop's own server, so the mounts come up
+  first from a mount comes with the run, answered from the local machine's own server, so the mounts come up
   and claude starts without a round trip. Lookups and listings are cached for 10 s, and absent names
   are answered from complete listings. Transcripts are written behind: claude's opens, writes and
-  reads of its own transcript never wait on the laptop.
+  reads of its own transcript never wait on the local machine.
 - **Everything the run needs, in its first frames.** The session's settings, appended prompt, MCP
   configuration, the local tools' list and the mounts' warm starts travel ahead of the start, and the
   first connection sends them right behind its greeting instead of after the helper's.
@@ -24,8 +26,8 @@ the laptop at all where it can:
 
 What still costs round trips: opening the run's channel (ssh starts the remote command, then sends
 its stdin a round trip later), each local tool call, an edit's permission decision (path rules
-resolve the laptop's files), reads beyond the warm start, and the end of a session, which waits for
-the laptop to confirm the transcript's last writes.
+resolve the local machine's files), reads beyond the warm start, and the end of a session, which waits for
+the local machine to confirm the transcript's last writes.
 
 ## Measured
 
@@ -47,7 +49,7 @@ container over the same shared ssh connection, without claudette.
 Claude Code's own background traffic costs more than claudette does. On a machine with internet
 access, plain `claude -p hi` takes about 1.1 s with it and 0.18 s without; telemetry is most of it
 (`DISABLE_TELEMETRY=1` alone brings it to 0.5 s). claudette passes Claude Code's variables to the
-remote claude, so `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` set on the laptop applies to every
+remote claude, so `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` set on the local machine applies to every
 session.
 
 ### On a slow link: 500 ms round trip, 10 Mbit/s
@@ -78,19 +80,19 @@ Of the 3.05 s for `-p hi`:
 - 0.5 s until the run's frames reach the helper: ssh sends a command's stdin only once the command
   has started.
 - 20 ms of setup on the remote machine: the mounts come up from their warm starts.
-- 0.7 s of claude's startup and the turn, as without claudette; its answer reaches the laptop at
+- 0.7 s of claude's startup and the turn, as without claudette; its answer reaches the local machine at
   about 2.4 s.
-- 0.55 s waiting for the laptop to confirm the transcript's last writes, then the exit code's way
+- 0.55 s waiting for the local machine to confirm the transcript's last writes, then the exit code's way
   back and the goodbye.
 
 Each local tool call costs one round trip, the call itself: a Bash call's permission is decided on
 the remote machine, and its transcript lines are written behind. An edit costs one more, for its
-permission decision on the laptop.
+permission decision on the local machine.
 
 ## Not done
 
 | Option | Would save | Cost |
 |---|---|---|
-| The laptop drains its servers after the exit code instead of the remote side waiting for the last transcript writes to be confirmed | ~0.5 s at the end of every session | The holder would have to send every channel's data before the exit code, and the laptop wait for its own servers to process it; today the order is guaranteed by the confirmation. |
-| Answer bridged MCP servers' handshakes on the remote machine, as for the local tools | 3 round trips per server from the laptop's configuration | Each server would have to start and list its tools before the run starts. |
-| A long-lived agent on the laptop keeping the connection open per project between sessions | The round trip of opening a channel, and the one before ssh passes stdin | A daemon to install and supervise. |
+| The local machine drains its servers after the exit code instead of the remote side waiting for the last transcript writes to be confirmed | ~0.5 s at the end of every session | The holder would have to send every channel's data before the exit code, and the local machine wait for its own servers to process it; today the order is guaranteed by the confirmation. |
+| Answer bridged MCP servers' handshakes on the remote machine, as for the local tools | 3 round trips per server from the local machine's configuration | Each server would have to start and list its tools before the run starts. |
+| A long-lived agent on the local machine keeping the connection open per project between sessions | The round trip of opening a channel, and the one before ssh passes stdin | A daemon to install and supervise. |

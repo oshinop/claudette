@@ -1,5 +1,7 @@
 # Design
 
+English · [简体中文](zh-CN/design.md)
+
 claudette looks at its arguments and takes one of three paths:
 
 | Arguments | Path | How tools reach this machine |
@@ -58,14 +60,14 @@ waiting, one after another, so the near end answers what it already knows:
   its auto memory. Markdown and JSON files up to 64 KB come with their contents, up to 256 KB a
   mount. It travels with the run's first frames. Since the answers come from the same server, hidden
   names stay hidden and settings files arrive as their views. The mounts come up, and claude starts,
-  without waiting for the laptop.
+  without waiting for the local machine.
 - **A short cache.** Attributes and complete listings, warm or fetched, answer for 10 s; a complete
   listing also answers that a name is not there. sshfs's own cache, which kept them for 20 s, is off
   under the near end. A change made through the mount drops what it touches. A change made on the
-  laptop shows within those 10 s, as it showed within sshfs's 20 s before.
+  local machine shows within those 10 s, as it showed within sshfs's 20 s before.
 - **Write-behind** for transcripts (see [Sessions](#sessions)).
 
-Anything else goes to the laptop as before.
+Anything else goes to the local machine as before.
 
 The environment prompt includes the working directory's and its ancestors' memory files. When a local
 Read, Edit, Write or NotebookEdit first touches a file below a working directory, the tool result also
@@ -80,7 +82,7 @@ installed: on a session's first connection claudette checks for the build for th
 machine's platform in `~/.claudette/bin/<sha256 prefix>/claudette` and copies it there if it
 is missing (a temporary name, checked against its checksum, then renamed; the two newest builds are
 kept). A release carries builds for macOS and Linux on arm64 and x86-64 next to the executable, so a
-Linux laptop can drive a Mac and the other way round. `claudette +doctor` makes the same
+local Linux machine can drive a Mac and the other way round. `claudette +doctor` makes the same
 check and reports the helper's version.
 
 A session holds its builds open from its start. `claudette +update` renames new builds over them,
@@ -104,7 +106,7 @@ without waiting for the helper's. A command passed through as is (`claude auth`,
 its environment from such a file, saved over ssh's stdin first, which it reads and removes before
 claude starts.
 
-When the connection drops (the laptop sleeps, the network changes, ssh dies), the session waits
+When the connection drops (the local machine sleeps, the network changes, ssh dies), the session waits
 instead of ending:
 
 - claude keeps running on the remote machine. Its reads through the mounts, its tool calls and
@@ -143,7 +145,7 @@ A transcript is written by the claude whose session it is and nobody else, so th
 sessions mount writes it behind. It keeps a copy of each transcript claude creates or appends to, as
 this machine has it (the same code turns the remote paths into this machine's), and answers claude's
 opens, writes, lookups and reads of it at once. Every write still leaves for this machine as it is
-made, in order, on a handle the near end chose, so the laptop never waits on an open and a hook here
+made, in order, on a handle the near end chose, so the local machine never waits on an open and a hook here
 that reads the transcript finds what claude wrote before running it. This machine's answers are only
 checked: a write it refuses fails claude's next write or close of that file, and an open it refuses
 drops the copy, so the transcript is this machine's to show again. The notice goes to stderr at once,
@@ -176,7 +178,7 @@ The project's two settings files reach claude through a view:
 - Rules and matchers that name a replaced tool (`Write`, `Edit|Write`) cover the local tool too, and
   `Bash(…)` rules hold for the local Bash.
 - What claude writes back, like an "always allow" saved for the project, is turned back first, so
-  `.claude/settings.local.json` on your laptop reads `"allow": ["Write"]`, as a local claude would
+  `.claude/settings.local.json` on your local machine reads `"allow": ["Write"]`, as a local claude would
   have written it.
 
 ## Tools, settings and MCP servers
@@ -198,13 +200,13 @@ where it belongs:
   `commands` and `output-styles`. Those four come from a read-only mount of yours, and nothing else of
   your `~/.claude` (credentials, sessions, history, caches) is reachable through it. Plugins come
   from mounts of their own (see [Plugins](#plugins)).
-- **From the remote user, shared** with every laptop and with claude run on the remote machine
+- **From the remote user, shared** with every local machine and with claude run on the remote machine
   itself: `~/.claude.json` (onboarding, folder trust, the account) and the rest of `~/.claude`
   (history, plugins, caches).
 - **The login** isn't in the folder at all. `CLAUDE_SECURESTORAGE_CONFIG_DIR` keeps it where Claude
   Code always keeps it, in the Keychain on macOS and in `~/.claude/.credentials.json` on Linux.
 
-So each laptop's sessions use its own configuration, and the remote machine's own
+So each local machine's sessions use its own configuration, and the remote machine's own
 `~/.claude/settings.json` plays no part.
 
 Your settings reach the remote claude through the same view as the project's: hooks and the status
@@ -282,7 +284,7 @@ On a name clash the host's servers win, then claudette's own (local scope over u
 `${VAR}` and `${VAR:-default}` expand from this machine's environment, for remote servers too.
 
 - Servers that run here reach claude through the relay or a socket the helper serves, so a server on
-  the laptop's `localhost` (T3 Code runs one) works, and tokens in headers stay on the laptop. The
+  the local machine's `localhost` (T3 Code runs one) works, and tokens in headers stay on the local machine. The
   bridge forwards MCP tools, resources, prompts, completions and server notifications unchanged. For
   Streamable HTTP it also keeps the optional GET event stream open and resumes it after a disconnect.
 - Remote servers are started by the remote claude, inside its sandbox, with their working directory in
@@ -304,7 +306,7 @@ and local settings as `--setting-sources` loads them, the caller's `--settings`,
 settings files, which win; or, when none names a plugin, by its manifest's `defaultEnabled` (on
 unless it says `false`). Each is served read-only over SFTP, mounted at
 `/tmp/claudette-<run>.plugins/<name>-<marketplace>`, and loaded with `--plugin-dir`, so its skills,
-agents, commands and output styles come from the laptop. The view of the project's settings and the
+agents, commands and output styles come from the local machine. The view of the project's settings and the
 caller's `--settings` leave out `enabledPlugins` and `extraKnownMarketplaces`, so the remote claude
 installs and loads none of the remote machine's plugins; a save of the project's settings keeps
 them as they are in the file here.
@@ -346,19 +348,19 @@ claudette takes the place of that program. It starts the real `claude` on the re
 
 ```mermaid
 sequenceDiagram
-  participant Host as Host + Agent SDK (laptop)
-  participant Claudette as claudette (laptop)
+  participant Host as Host + Agent SDK (local machine)
+  participant Claudette as claudette (local machine)
   participant Claude as claude (remote, over ssh)
   Host->>Claudette: claude --input-format stream-json …
   Claudette->>Claude: same args − built-in Read/Write/Edit/Glob/Grep/Bash
   Host->>Claudette: initialize
   Claudette->>Claude: initialize + sdk server "cc" (with its handshake), toolAliases, local environment
   Claude->>Claudette: control_request mcp_message {server "cc", tools/call Edit}
-  Note over Claudette: runs Edit on the laptop, answers claude itself
+  Note over Claudette: runs Edit on the local machine, answers claude itself
   Claude->>Claudette: can_use_tool mcp__cc__Bash
   Claudette->>Host: can_use_tool Bash (built-in name, command-prefix suggestion)
   Claude->>Claudette: assistant / tool events
-  Claudette->>Host: events with built-in tool names and laptop paths
+  Claudette->>Host: events with built-in tool names and local paths
 ```
 
 The remote claude runs with its built-in file and shell tools turned off. claudette offers local
@@ -367,7 +369,7 @@ control channel. The server's handshake goes out with `initialize`, which saves 
 trips.
 
 The host never sees the `mcp__cc__` names or the remote folder. Tool calls show up as `Read`, `Edit`
-and `Bash` with laptop paths, and permission requests reach the host under the same names. In
+and `Bash` with local paths, and permission requests reach the host under the same names. In
 acceptEdits mode, edits inside the working directories are approved the way Claude Code approves its
 own. An approved command prefix such as `npm test:*` covers later commands, never compound ones that
 use `;`, `&&`, `|` or `$(…)`; saved to the project's settings, it holds in later sessions too.
@@ -381,7 +383,7 @@ they reach the local tools as ordinary stdio MCP servers:
 
 ```mermaid
 flowchart LR
-  subgraph laptop[This machine]
+  subgraph local[This machine]
     T[your terminal] --- CT[claudette]
     CT --> S1[(socket: local tools)]
     CT --> S2[(socket: permission hook)]
@@ -421,7 +423,7 @@ the session is working, idle or waiting for input; claude doesn't wait on them (
 Each carries the remote machine's time of sending, and this machine lets an older one's status be,
 since two of them can arrive out of order.
 
-The laptop's environment, git status and `CLAUDE.md` files go in `--append-system-prompt`. Sessions
+The local machine's environment, git status and `CLAUDE.md` files go in `--append-system-prompt`. Sessions
 are in the mounted sessions folder, as with the relay, so `claudette --continue` and
 `--resume <id>` pick up sessions that T3 Code or Paseo started too.
 
@@ -429,12 +431,12 @@ are in the mounted sessions folder, as with the relay, so `claudette --continue`
 
 Claude Code's ListAgents and SendMessage find sessions through a registry shared by every claude of
 the user (`~/.claude/sessions`). On the remote machine that would be every session there: other
-laptops' on the same account, and ones started on it directly. So the built-ins stay off, and local
+local machines' on the same account, and ones started on it directly. So the built-ins stay off, and local
 versions with the same names and inputs reach this machine's claudette sessions only:
 
 ```mermaid
 flowchart LR
-  subgraph laptop[This machine]
+  subgraph local[This machine]
     A[claudette A] -->|ListAgents: ask every run folder's agent.sock| B[claudette B]
     A -->|SendMessage| B
   end

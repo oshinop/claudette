@@ -1,5 +1,7 @@
 # Installation and configuration
 
+English · [简体中文](zh-CN/configuration.md)
+
 ## Requirements
 
 The remote machine needs:
@@ -15,7 +17,7 @@ The remote machine needs:
 Nothing else is installed there. claudette copies itself to `~/.claudette/bin` on first use (see
 [design](design.md#the-helper)).
 
-The laptop needs ssh that reaches the remote machine without a prompt. Keys, users and ports go in
+The local machine needs ssh that reaches the remote machine without a prompt. Keys, users and ports go in
 `~/.ssh/config`, and a key with a passphrase belongs in an agent. Run `ssh mini` once in a terminal
 to accept the host key, then check with `ssh -o BatchMode=yes mini claude --version`.
 
@@ -34,7 +36,7 @@ curl -fsSL https://raw.githubusercontent.com/oshinop/claudette/main/scripts/inst
 
 The script downloads every platform's build from the latest GitHub release, checks them against the
 release's `SHA256SUMS`, puts them in `~/.local/share/claudette` and links `~/.local/bin/claudette` to
-this machine's. claudette copies the remote machine's build from beside its own, so a Mac laptop
+this machine's. claudette copies the remote machine's build from beside its own, so a local Mac
 driving a Linux machine uses `claudette-linux-arm64` or `-x64` from that folder.
 `CLAUDETTE_VERSION` picks a release (`v0.1.0`), and `CLAUDETTE_BIN_DIR` and `CLAUDETTE_LIB_DIR`
 change the folders.
@@ -77,7 +79,7 @@ they need a Mac. Keep the builds together in one folder, as the install script d
 
 To make it your `claude`, link it under that name in a folder that comes before any other `claude`
 on `PATH`. claudette follows the link to find its other builds, and it never runs a local `claude`.
-The laptop doesn't need Claude Code installed. If a native install stays, put the link in an earlier
+The local machine doesn't need Claude Code installed. If a native install stays, put the link in an earlier
 folder: its updater rewrites `~/.local/bin/claude`.
 
 ```sh
@@ -108,7 +110,7 @@ refuses a key it doesn't know, so a typo doesn't go unnoticed.
 |---|---|
 | `host` | the remote machine, as ssh takes it: an alias from `~/.ssh/config`, `user@host`, or an `ssh://user@host:port` URL. A URL carries no key or other options; those go in `~/.ssh/config` or the `ssh` setting. |
 | `ssh` | ssh command and options, as a list or a string. By default, sessions share one connection with keepalives (`ControlMaster`, kept 10 minutes, its socket in the private folder `/tmp/claudette-<uid>`), and a session reconnecting after a drop opens its own. These options come before claudette's and ssh keeps the first value it sees, so `-o BatchMode=no` here overrides claudette's; a `BatchMode` line in `~/.ssh/config` does not. |
-| `detach_timeout` | how long the remote machine keeps a session waiting for the laptop to reconnect before it stops the remote claude: seconds, or `"90s"`, `"30m"`, `"12h"` (default `"12h"`) |
+| `detach_timeout` | how long the remote machine keeps a session waiting for the local machine to reconnect before it stops the remote claude: seconds, or `"90s"`, `"30m"`, `"12h"` (default `"12h"`) |
 | `remote_claude` | claude command on the remote machine (default `claude`; `~/.local/bin` is on its PATH) |
 | `remote_nc` | Unix-socket relay on the remote machine, run as `<cmd> -U <path>` (default `nc`) |
 | `forward_claude_env` | whether Claude Code's own variables set on this machine reach the remote claude (default `true`). These are the `ANTHROPIC_*`, `CLAUDE_*`, `DISABLE_*`, `ENABLE_*`, `MCP_*` and `VERTEX_REGION_*` variables, Claude Code's others such as `MAX_THINKING_TOKENS`, `API_TIMEOUT_MS` and `DO_NOT_TRACK`, and the credentials it reads: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (with its refresh token and scopes), the Foundry, AWS and Bedrock keys and `MCP_CLIENT_SECRET`. Provider and endpoint settings (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_*`, Bedrock, Vertex and Foundry settings) go as set, so the remote claude uses the provider, endpoint and credential you set here, as a local claude would; the endpoint has to be reachable from the remote machine. Held back: the variables that name a file or folder on this machine (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`, the mTLS key and certificate, …), what a claude on this machine sets for its own children (`CLAUDE_CODE_SESSION_ID`, its messaging token, …), and other keys and tokens in those families, such as an `MCP_*_TOKEN` for a server. The `env` of your settings files is passed the same way, except its credentials, which stay here with the rest of this machine's login (`apiKeyHelper` and the like). |
@@ -121,4 +123,4 @@ refuses a key it doesn't know, so a typo doesn't go unnoticed.
 Plugins are this machine's: `claude plugin install`, `claude plugin marketplace add` and the rest
 run Claude Code's own commands on `~/.claude/plugins` and your settings here, as a local claude
 would, and sessions load what is installed and enabled. Their hooks and MCP servers run on the
-laptop, with the options you gave them.
+local machine, with the options you gave them.

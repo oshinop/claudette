@@ -10,31 +10,33 @@
   <img src="https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust" alt="Rust 1.88 or later">
 </p>
 
+<p align="center">English · <a href="README_zh-CN.md">简体中文</a></p>
+
 A drop-in `claude` that runs Claude Code on another machine, reached over ssh, and its tools on this
-one: your files, builds and git stay on the laptop, while the remote machine holds the login.
+one: your files, builds and git stay on the local machine, while the remote machine holds the login.
 
 ## What you get
 
 - A drop-in `claude`: anything that launches Claude Code launches claudette unchanged, and your
   settings, permission rules, hooks, skills, plugins and MCP servers apply as they would locally.
-- A light laptop: Claude Code itself runs on the remote machine, so a modest laptop keeps many agents
-  going at once, with no Claude Code install or login of its own.
-- No telemetry from the laptop: claudette sends none, and Claude Code's own comes from the remote
+- Little load on the local machine: Claude Code itself runs on the remote machine, so a modest
+  machine keeps many agents going at once, with no Claude Code install or login of its own.
+- No telemetry from the local machine: claudette sends none, and Claude Code's own comes from the remote
   machine.
-- Sessions that survive the laptop sleeping or the network dropping.
+- Sessions that survive the local machine sleeping or the network dropping.
 
 ## Use cases
 
 - [T3 Code](https://github.com/pingdotgg/t3code) and [Paseo](https://paseo.sh) run many Claude
-  threads at once; with claudette, all of them run on a Mac mini at home instead of the laptop
+  threads at once; with claudette, all of them run on a Mac mini at home instead of the local machine
   (setup: [T3 Code](docs/hosts.md#t3-code), [Paseo](docs/hosts.md#paseo)).
 - [magpie](https://usemagpie.ai) lends a Claude subscription to Codex, OpenCode and other agents;
-  with claudette, the subscription signed in on the remote machine serves the laptop's agents
+  with claudette, the subscription signed in on the remote machine serves the local machine's agents
   ([setup](docs/hosts.md#magpie)).
 - Clients that speak [ACP](https://agentclientprotocol.com), such as Zed, JetBrains AI Assistant,
   [Toad](https://github.com/batrachianai/toad) and [acpc](https://github.com/AkaraChen/acpc), run
   Claude through the [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)
-  adapter; with claudette behind it, Claude runs on the remote machine and works on the laptop's
+  adapter; with claudette behind it, Claude runs on the remote machine and works on the local machine's
   files ([setup](docs/hosts.md#acp-clients)).
 
 ## Set up
@@ -85,8 +87,9 @@ Issues and pull requests are welcome on [GitHub](https://github.com/oshinop/clau
   release builds and the installer. A change in behavior comes with a test that would catch it
   breaking: unit tests sit beside the code, and end-to-end tests in `tests/e2e` drive the real
   Claude Code in containers ([testing](docs/testing.md)). Update the docs the change makes stale,
-  including the coverage list in `docs/testing.md`. There is no formatter configuration: follow the
-  style of the file you change.
+  including the coverage list in `docs/testing.md`, and their Chinese versions in `docs/zh-CN`
+  (`README_zh-CN.md` for this file). There is no formatter configuration: follow the style of the
+  file you change.
 
 ## Acknowledgements
 

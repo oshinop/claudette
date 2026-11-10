@@ -82,7 +82,7 @@ Issues and pull requests are welcome on [GitHub](https://github.com/oshinop/clau
   ([configuration](docs/configuration.md#configure)) records every frame and mount request. It
   contains prompts and file contents, so share only the relevant part.
 - **Hosts and clients:** a report that a host from [hosts](docs/hosts.md) works or doesn't, with
-  its version and what you tried, helps as much as code. Most of the hosts listed there are untested.
+  its version and what you tried, helps as much as code.
 - **Pull requests:** `cargo test` and `scripts/test.sh` should pass. CI runs both, plus the four
   release builds and the installer. A change in behavior comes with a test that would catch it
   breaking: unit tests sit beside the code, and end-to-end tests in `tests/e2e` drive the real

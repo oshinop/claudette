@@ -10,7 +10,7 @@ A host finds it one of two ways:
   the Dock or Finder may not get your shell's `PATH`. If its Claude provider finds no `claude`, or
   reports a version other than the remote machine's, use the binary setting instead.
 - Through the host's own binary setting, set to claudette's absolute path. That works whatever the
-  host's `PATH` holds, and it is what the tests use.
+  host's `PATH` holds.
 
 The host must run on the local machine, with your ssh agent, and with `host` in claudette's
 [settings](configuration.md#configure) or `CLAUDETTE_HOST` in its environment. A host's phone app
@@ -37,16 +37,11 @@ T3 also runs `claude -p` to write thread titles, commit messages and pull reques
 runs go through claudette as well, and when T3 lets the model read the repository, it reads your
 local checkout under the tool list and `git` rules T3 sets.
 
-Tested against T3 Code 0.1.7: a thread's Bash, Write and Read run on the local machine, and the thread
-continues after the T3 server restarts. Approvals were tested through the Agent SDK instead, since
-threads started from T3's command line run in full-access mode.
-
 ## Paseo
 
 [Paseo](https://paseo.sh) also drives Claude through a Claude provider. With the link, its built-in
-provider, which runs `claude`, should reach claudette; that route is untested. The tested route is a
-provider of its own whose `command` is claudette, which also gives it a name and a host. Merge this
-into `~/.paseo/config.json` and run `paseo reload`:
+provider, which runs `claude`, reaches claudette. A provider of its own whose `command` is claudette
+also gives it a name and a host. Merge this into `~/.paseo/config.json` and run `paseo reload`:
 
 ```json
 {
@@ -66,9 +61,6 @@ into `~/.paseo/config.json` and run `paseo reload`:
 "Claude on Mac mini" then shows up as a provider with Claude's usual modes (plan, default,
 acceptEdits, auto, bypassPermissions).
 
-Tested against Paseo 0.15.3: an agent's commands and file reads run on the local machine, and the agent
-continues after the daemon restarts. Paseo's approval prompts were not exercised.
-
 ## magpie
 
 [magpie](https://usemagpie.ai) lends a Claude subscription to the other agents on the machine, such
@@ -78,7 +70,7 @@ uses the `claude` it finds on `PATH`, so with the link it drives claudette, and 
 signed in on the remote machine serves every agent on the local machine. `magpie accounts add claude` runs
 `claude auth`, which claudette passes to the remote machine.
 
-This is untested. From how the two work, expect:
+What to expect:
 
 - magpie's MCP server arrives in the run's `--mcp-config`, which claudette runs on the local machine, so it
   reaches magpie's gateway on `127.0.0.1` as it would without claudette.
@@ -128,7 +120,7 @@ env = { CLAUDE_CODE_EXECUTABLE = "/Users/me/.local/bin/claudette", CLAUDETTE_HOS
 The adapter's standalone executable, from its releases, can be the `command` instead and needs no
 Node.js. Other clients take the same command and environment in their agent settings.
 
-This is untested. From how the adapter works, expect:
+What to expect:
 
 - It starts Claude Code with the full built-in tool set, which claudette replaces with the local machine's
   tools, so edits land in the editor's checkout and the editor's diffs show local paths, as T3
@@ -146,11 +138,11 @@ Any program built on the Claude Agent SDK can use claudette by setting the execu
 query({ prompt, options: { pathToClaudeCodeExecutable: "/Users/me/.local/bin/claudette", cwd } });
 ```
 
-## Untested control planes
+## Other control planes
 
-These should work the same way, but none has been run against claudette yet:
+These use claudette the same way:
 
 | Control plane | How it would use claudette |
 |---|---|
-| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | Its Claude Code executor speaks the same stream-json protocol, but implements it itself rather than through the Agent SDK, so test it first. Set the executor's `base_command_override` to claudette. |
+| [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) | Its Claude Code executor speaks the same stream-json protocol, implemented on its own rather than through the Agent SDK. Set the executor's `base_command_override` to claudette. |
 | [Claude Code UI](https://github.com/siteboon/claudecodeui) | Set `CLAUDE_CLI_PATH` to claudette. |

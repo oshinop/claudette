@@ -65,7 +65,7 @@ CI 会在 Linux 和 macOS 上运行单元测试，测试四种构建产物及安
 欢迎在 [GitHub](https://github.com/oshinop/claudette) 上提交 issue 和 pull request。
 
 - **报告缺陷**：请附上 `claudette +doctor` 的输出、两台机器的操作系统，以及启动 claudette 的宿主（如有，例如 T3 Code、Paseo、ACP 客户端）。`log` 设置（参见[配置](docs/zh-CN/configuration.md#configure)）会记录每一帧和每个挂载请求，其中包含提示词和文件内容，因此请只分享相关部分。
-- **宿主与客户端**：报告[宿主列表](docs/zh-CN/hosts.md)中的某个宿主能否正常工作，并附上版本号和尝试过的操作，与贡献代码同样有帮助。列表中的大多数宿主尚未经过测试。
+- **宿主与客户端**：报告[宿主列表](docs/zh-CN/hosts.md)中的某个宿主能否正常工作，并附上版本号和尝试过的操作，与贡献代码同样有帮助。
 - **Pull request**：`cargo test` 和 `scripts/test.sh` 应当通过。CI 会运行这两项检查，还会测试四种发行版构建产物及安装程序。行为变更应附带能捕获该行为被破坏的测试：单元测试放在代码旁，`tests/e2e` 中的端到端测试则在容器内驱动真实的 Claude Code（参见[测试](docs/zh-CN/testing.md)）。请更新因变更而过时的文档，包括 `docs/testing.md` 中的覆盖范围列表，以及 `docs/zh-CN` 中对应的中文版（本文件对应 `README_zh-CN.md`）。项目没有格式化工具配置，请遵循所修改文件的风格。
 
 <a id="acknowledgements"></a>

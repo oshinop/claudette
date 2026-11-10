@@ -45,8 +45,9 @@ claudette +doctor                               # checks ssh and the remote mach
 ln -s "$(command -v claudette)" ~/bin/claude    # a folder on PATH, ahead of any other claude
 ```
 
-[Installation and configuration](docs/configuration.md) covers what both machines need, the other
-settings, and why a link rather than an alias.
+`claudette +update` installs a newer release later; claudette's own commands mention one when it is
+out. [Installation and configuration](docs/configuration.md) covers what both machines need, the
+other settings, updating, and why a link rather than an alias.
 
 ## Use
 

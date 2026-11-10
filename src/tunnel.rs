@@ -59,8 +59,11 @@ pub struct Tunnel {
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
+/// Every platform the release carries a build for, named as it names them.
+pub const PLATFORMS: [&str; 4] = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+
 /// This machine's platform, named as the release names its builds.
-fn platform() -> &'static str {
+pub fn platform() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "darwin-arm64",
         ("macos", _) => "darwin-x64",
@@ -72,37 +75,55 @@ fn platform() -> &'static str {
 /// A build of claudette for a platform, as the remote machine stores it.
 struct Build {
     platform: String,
-    path: PathBuf,
+    /// Held open from the session's start: `+update` renames new builds over the old ones, and a
+    /// session that copies its build to the remote machine later must copy the one it hashed.
+    file: std::fs::File,
     /// The full sha256, hex; its first 16 digits name the folder on the remote machine.
     sha: String,
 }
 
 impl Build {
+    fn open(platform: &str, path: &Path) -> std::io::Result<Build> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut chunk = vec![0; 1 << 16];
+        loop {
+            match file.read(&mut chunk)? {
+                0 => break,
+                n => hasher.update(&chunk[..n]),
+            }
+        }
+        let sha = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        Ok(Build { platform: platform.to_owned(), file, sha })
+    }
+
     fn folder(&self) -> &str {
         &self.sha[..16]
+    }
+
+    /// The build's bytes as they were when it was opened.
+    fn bytes(&self) -> std::io::Result<Vec<u8>> {
+        use std::os::unix::fs::FileExt;
+        let mut bytes = vec![0; usize::try_from(self.file.metadata()?.len()).unwrap_or(usize::MAX)];
+        self.file.read_exact_at(&mut bytes, 0)?;
+        Ok(bytes)
     }
 }
 
 /// The builds available here: this executable, and the release's other builds beside it.
 fn builds() -> Vec<Build> {
     let Ok(exe) = std::env::current_exe().and_then(std::fs::canonicalize) else { return vec![] };
-    let mut found = vec![(platform().to_owned(), exe.clone())];
+    let mut found = vec![(platform(), exe.clone())];
     if let Some(dir) = exe.parent() {
-        for p in ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"] {
+        for p in PLATFORMS {
             let path = dir.join(format!("claudette-{p}"));
             if p != platform() && path.is_file() {
-                found.push((p.to_owned(), path));
+                found.push((p, path));
             }
         }
     }
-    found
-        .into_iter()
-        .filter_map(|(platform, path)| {
-            let bytes = std::fs::read(&path).ok()?;
-            let sha = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
-            Some(Build { platform, path, sha })
-        })
-        .collect()
+    found.into_iter().filter_map(|(platform, path)| Build::open(platform, &path).ok()).collect()
 }
 
 /// Runs the helper's bridge for `run`: with `spawn` (the first connection) it starts the holder, and
@@ -164,7 +185,7 @@ cd "$HOME/.claudette/bin" && ls -t | tail -n +3 | while read -r old; do rm -rf -
     );
     let argv = crate::ssh::ssh_argv(config, &script, false);
     let mut child = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn()?;
-    let bytes = std::fs::read(&build.path)?;
+    let bytes = build.bytes()?;
     let mut stdin = child.stdin.take().expect("piped");
     stdin.write_all(&bytes).await?;
     drop(stdin);
@@ -624,7 +645,7 @@ mod tests {
 
     #[test]
     fn the_start_command_runs_the_cached_build_for_the_machines_platform_or_names_the_platform() {
-        let builds = vec![Build { platform: "linux-arm64".into(), path: "/x".into(), sha: "0123456789abcdef".repeat(4) }];
+        let builds = vec![Build { platform: "linux-arm64".into(), file: std::fs::File::open("/dev/null").unwrap(), sha: "0123456789abcdef".repeat(4) }];
         let script = connect_script(&builds, "00000000000000ab", true);
         assert!(script.contains("linux-arm64) h=0123456789abcdef;;"));
         assert!(script.contains("__helper connect '00000000000000ab' --spawn"));
@@ -633,5 +654,20 @@ mod tests {
         let line = String::from_utf8_lossy(&out.stdout);
         assert!(line.starts_with(MISSING), "{line}");
         assert!(!connect_script(&builds, "00000000000000ab", false).contains("--spawn"));
+    }
+
+    #[test]
+    fn a_build_replaced_on_disk_still_gives_the_bytes_it_was_hashed_from() {
+        let dir = std::env::temp_dir().join(format!("ct-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claudette-linux-x64");
+        std::fs::write(&path, b"old build").unwrap();
+        let build = Build::open("linux-x64", &path).unwrap();
+        // `+update` writes the new build beside the old one and renames it over.
+        let next = dir.join(".claudette-linux-x64.update");
+        std::fs::write(&next, b"the new build, longer").unwrap();
+        std::fs::rename(&next, &path).unwrap();
+        assert_eq!(build.bytes().unwrap(), b"old build");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

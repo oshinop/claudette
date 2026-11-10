@@ -18,8 +18,9 @@ ones T3 Code or Paseo started, and the ones a local claude wrote before you swit
 
 Claude Code's own commands, such as `claude auth` or `claude doctor`, run on the remote machine as
 they are. claudette's own commands start with `+`: `claude +doctor` checks ssh and the remote
-machine, and `claude +help` lists the commands and settings. If `+` gets in your way, choose another
-`prefix` in the [settings](configuration.md#configure).
+machine, `claude +update` installs the latest release, and `claude +help` lists the commands and
+settings. On a terminal, these say when a newer release is out. If `+` gets in your way, choose
+another `prefix` in the [settings](configuration.md#configure).
 
 To run claudette from T3 Code, Paseo, magpie or an Agent SDK program, see [hosts](hosts.md).
 

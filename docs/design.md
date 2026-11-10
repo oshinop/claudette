@@ -83,6 +83,11 @@ kept). A release carries builds for macOS and Linux on arm64 and x86-64 next to 
 Linux laptop can drive a Mac and the other way round. `claudette +doctor` makes the same
 check and reports the helper's version.
 
+A session holds its builds open from its start. `claudette +update` renames new builds over them,
+so a session that started before reconnects to the helper it started with, and copies that build
+again if the remote machine removed it, rather than a build whose checksum it never took. The next
+session runs the new build on both machines.
+
 For each run the helper starts a holder, detached from ssh, with its state in
 `/tmp/claudette-<run>.*` (mode 0600, removed at the end). The holder runs claude (on a terminal
 it owns for the interactive interface, on pipes otherwise) and serves the run's Unix sockets: the

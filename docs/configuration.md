@@ -43,6 +43,28 @@ Any [setting](#configure) given as a variable, such as `CLAUDETTE_HOST` or `CLAU
 goes into a new `~/.config/claudette/config.toml`; an existing one is left alone. Put the variables
 on `sh`, after the pipe: on `curl`, they never reach the script.
 
+### Update
+
+```sh
+claudette +update            # the latest release
+claudette +update 0.1.0      # a given one, older too
+```
+
+`+update` downloads every platform's build of the release, checks them against its `SHA256SUMS`,
+makes sure this machine's build runs, and only then renames them over the ones beside the running
+claudette. A failure leaves the installed builds as they were. It works for an install the script
+made (builds named `claudette-<platform>`), and `CLAUDETTE_DOWNLOAD_URL` points it at a mirror, as
+for the script. Running the install script again does the same.
+
+Sessions already running keep the build they started with, and finish on it. The remote machine
+gets the new build on the next session (see [design](design.md#the-helper)); nothing needs doing
+there.
+
+claudette's own commands (`+help`, `+version`, `+doctor`), run on a terminal, end with a line when a
+newer release is out. Each asks GitHub while it runs, waits at most 2 seconds for the answer, and
+keeps nothing on disk. Nothing else claudette runs, `claude` sessions and scripts included, looks
+for releases.
+
 To build instead, you need Rust through rustup, zig and cargo-zigbuild (see the
 [README](../README.md#development)):
 
@@ -92,7 +114,7 @@ refuses a key it doesn't know, so a typo doesn't go unnoticed.
 | `forward_claude_env` | whether Claude Code's own variables set on this machine reach the remote claude (default `true`). These are the `ANTHROPIC_*`, `CLAUDE_*`, `DISABLE_*`, `ENABLE_*`, `MCP_*` and `VERTEX_REGION_*` variables, Claude Code's others such as `MAX_THINKING_TOKENS`, `API_TIMEOUT_MS` and `DO_NOT_TRACK`, and the credentials it reads: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN` (with its refresh token and scopes), the Foundry, AWS and Bedrock keys and `MCP_CLIENT_SECRET`. Provider and endpoint settings (`ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_*`, Bedrock, Vertex and Foundry settings) go as set, so the remote claude uses the provider, endpoint and credential you set here, as a local claude would; the endpoint has to be reachable from the remote machine. Held back: the variables that name a file or folder on this machine (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`, the mTLS key and certificate, …), what a claude on this machine sets for its own children (`CLAUDE_CODE_SESSION_ID`, its messaging token, …), and other keys and tokens in those families, such as an `MCP_*_TOKEN` for a server. The `env` of your settings files is passed the same way, except its credentials, which stay here with the rest of this machine's login (`apiKeyHelper` and the like). |
 | `forward_env` | more variables to pass to the remote claude, whatever they are and whether or not `forward_claude_env` is on: `["AWS_REGION", "AWS_PROFILE"]` for Bedrock, or `["GITHUB_TOKEN"]`, for example. Forwarded values never appear on the remote command line, where other users of the remote machine could read them (see [design](design.md#the-helper)). |
 | `log` | file to append every relayed frame to, and every request the remote claude makes through the mounts. It contains prompts, file contents and the forwarded variables' values. |
-| `prefix` | what marks claudette's own commands (default `+`: `claudette +doctor`, `+version`, `+help`). Any first argument that starts with it goes to claudette, so pick something no prompt starts with. A prefix starting with `-` is refused. |
+| `prefix` | what marks claudette's own commands (default `+`: `claudette +doctor`, `+update`, `+version`, `+help`). Any first argument that starts with it goes to claudette, so pick something no prompt starts with. A prefix starting with `-` is refused. |
 
 ### Plugins
 

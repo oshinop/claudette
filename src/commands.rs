@@ -1,5 +1,6 @@
-//! claudette's own commands, beside claude's: `claudette +doctor`, `+version`, `+help`. The prefix
-//! (`+` unless the `prefix` setting says otherwise) keeps them apart from claude's commands and prompts.
+//! claudette's own commands, beside claude's: `claudette +doctor`, `+update`, `+version`, `+help`. The
+//! prefix (`+` unless the `prefix` setting says otherwise) keeps them apart from claude's commands and
+//! prompts. On a terminal they end with a notice when a newer release is out; nothing else shows it.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -15,6 +16,7 @@ use crate::ssh::{claude_command, shell_quote};
 use crate::VERSION;
 use crate::mount::workdir;
 use crate::run::exit_code;
+use crate::update::version_tuple;
 
 /// The Claude Code version the test suite runs against.
 const TESTED_CLAUDE: &str = "2.1.319";
@@ -48,29 +50,47 @@ pub fn see_help(prefix: &str) -> String {
 
 /// The help, with claudette's own commands under the prefix in use, aligned with the rest.
 fn usage(prefix: &str) -> String {
-    let own = [("doctor", "check ssh and the remote machine"), ("version", "print claudette's version"), ("help", "show this help")]
+    let own = [
+        ("doctor", "check ssh and the remote machine"),
+        ("update [version]", "install the latest release, or the one named"),
+        ("version", "print claudette's version"),
+        ("help", "show this help"),
+    ]
         .map(|(name, what)| format!("  {:<32}{what}", format!("claudette {prefix}{name}")))
         .join("\n");
     USAGE.replace("{own}", &own)
 }
 
-/// `command`: what follows the prefix (`doctor` in `+doctor`).
-pub async fn run(command: &str, prefix: &str, cwd: &Path) -> anyhow::Result<i32> {
-    match command {
-        "" | "help" => println!("claudette {VERSION}: {}", usage(prefix)),
-        "version" => println!("{VERSION}"),
+/// `command`: what follows the prefix (`doctor` in `+doctor`); `args`, the arguments after it.
+pub async fn run(command: &str, args: &[String], prefix: &str, cwd: &Path) -> anyhow::Result<i32> {
+    if command == "update" {
+        anyhow::ensure!(args.len() <= 1, "`{prefix}update` takes at most a version; {}", see_help(prefix));
+        return crate::update::update(args.first().map(String::as_str)).await;
+    }
+    // Looked for while the command runs; only on a terminal, so scripts never wait on it.
+    let notice = std::io::IsTerminal::is_terminal(&std::io::stderr()).then(|| tokio::spawn(crate::update::notice(prefix.to_owned())));
+    let code = match command {
+        "" | "help" => {
+            println!("claudette {VERSION}: {}", usage(prefix));
+            0
+        }
+        "version" => {
+            println!("{VERSION}");
+            0
+        }
         "doctor" => {
             let config = Config::load()?;
             crate::log::open(config.log_file.clone());
-            return doctor(&config, cwd).await;
+            doctor(&config, cwd).await?
         }
         other => bail!("unknown command `{prefix}{other}`; {}", see_help(prefix)),
+    };
+    if let Some(notice) = notice
+        && let Ok(Ok(Some(line))) = tokio::time::timeout(crate::update::CHECK_TIMEOUT, notice).await
+    {
+        eprintln!("\n{line}");
     }
-    Ok(0)
-}
-
-fn version_tuple(v: &str) -> Vec<u64> {
-    v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+    Ok(code)
 }
 
 async fn doctor(config: &Config, cwd: &Path) -> anyhow::Result<i32> {

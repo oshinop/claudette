@@ -1,0 +1,87 @@
+name: claudette
+
+# Test topology. `local` runs claudette and the tests, `remote` runs sshd and the real Claude Code
+# CLI, `mockapi` stands in for the Anthropic API. The network is internal: nothing reaches the internet.
+# Build contexts are the repository root, two folders up; scripts/test.sh points compose here.
+services:
+  keygen:
+    image: claudette-remote
+    build: { context: ../.., dockerfile: tests/docker/remote.Dockerfile }
+    entrypoint:
+      - /bin/sh
+      - -c
+      - test -f /keys/id_ed25519 || ssh-keygen -q -t ed25519 -N '' -C claudette-test -f /keys/id_ed25519; chmod 644 /keys/id_ed25519 /keys/id_ed25519.pub
+    volumes: [keys:/keys]
+    network_mode: none
+
+  mockapi:
+    image: claudette-local
+    build: { context: ../.., dockerfile: tests/docker/local.Dockerfile, target: local }
+    entrypoint: []
+    command: [bun, mock-api/server.ts]
+    networks: [claudette]
+    healthcheck:
+      test: [CMD, bun, -e, "await fetch('http://127.0.0.1:8080/_health').then(r => process.exit(r.ok ? 0 : 1))"]
+      interval: 1s
+      retries: 30
+
+  remote:
+    image: claudette-remote
+    build: { context: ../.., dockerfile: tests/docker/remote.Dockerfile }
+    hostname: remote
+    depends_on:
+      keygen: { condition: service_completed_successfully }
+      mockapi: { condition: service_healthy }
+    volumes: [keys:/keys:ro]
+    # FUSE for the sshfs workspace mount; user namespaces (unconfined seccomp/AppArmor) for bubblewrap.
+    devices: [/dev/fuse]
+    cap_add: [SYS_ADMIN]
+    security_opt: [seccomp=unconfined, apparmor=unconfined]
+    networks: [claudette]
+
+  local:
+    image: claudette-local
+    build: { context: ../.., dockerfile: tests/docker/local.Dockerfile, target: local }
+    hostname: local
+    depends_on:
+      remote: { condition: service_healthy }
+    volumes: [keys:/keys:ro]
+    environment:
+      CLAUDETTE_HOST: remote
+      MOCK_API: http://mockapi:8080
+    networks: [claudette]
+
+  # The local machine again, with a T3 Code server whose Claude provider runs claudette.
+  t3:
+    image: claudette-t3
+    build: { context: ../.., dockerfile: tests/docker/local.Dockerfile, target: t3 }
+    hostname: local
+    depends_on:
+      remote: { condition: service_healthy }
+    volumes: [keys:/keys:ro]
+    environment:
+      CLAUDETTE_HOST: remote
+      MOCK_API: http://mockapi:8080
+    networks: [claudette]
+    profiles: [planes]
+
+  # The local machine again, with a Paseo daemon whose Claude provider runs claudette.
+  paseo:
+    image: claudette-paseo
+    build: { context: ../.., dockerfile: tests/docker/local.Dockerfile, target: paseo }
+    hostname: local
+    depends_on:
+      remote: { condition: service_healthy }
+    volumes: [keys:/keys:ro]
+    environment:
+      CLAUDETTE_HOST: remote
+      MOCK_API: http://mockapi:8080
+    networks: [claudette]
+    profiles: [planes]
+
+networks:
+  claudette:
+    internal: true
+
+volumes:
+  keys:

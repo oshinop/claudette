@@ -1,0 +1,5 @@
+{
+  "hasCompletedOnboarding": true,
+  "theme": "dark",
+  "customApiKeyResponses": { "approved": ["api03-claudette-test"], "rejected": [] }
+}

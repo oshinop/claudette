@@ -1,0 +1,36 @@
+name: Release
+
+# Push a tag that matches Cargo.toml's version (v0.1.0 for version 0.1.0) to publish its builds.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check the tag against Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - run: cargo test --locked
+      - run: scripts/build.sh
+      - run: test "$(dist/claudette-darwin-arm64 +version)" = "${GITHUB_REF_NAME#v}"
+      - run: cd dist && shasum -a 256 claudette-* > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/claudette-* dist/SHA256SUMS --title "claudette $GITHUB_REF_NAME" --generate-notes --verify-tag

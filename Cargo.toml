@@ -1,0 +1,37 @@
+[package]
+name = "claudette"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "claude, running on a remote machine, working on this one"
+publish = false
+
+[dependencies]
+anyhow = "1"
+base64 = "0.23"
+bytes = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+globset = "0.4"
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+libc = "0.2"
+nix = { version = "0.31", features = ["signal", "process", "user", "feature", "hostname", "fs", "term", "ioctl"] }
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "http2"] }
+russh-sftp = "3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+tokio = { version = "1", features = ["rt", "macros", "process", "io-util", "io-std", "net", "fs", "time", "sync", "signal"] }
+tokio-util = "0.7"
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

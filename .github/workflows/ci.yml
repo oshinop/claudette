@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  build:
+    name: Release builds and the installer
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-unknown-linux-musl,x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/build.sh
+      - name: Install from the builds, as from a release
+        run: |
+          (cd dist && shasum -a 256 claudette-* > SHA256SUMS)
+          python3 -m http.server 8765 --directory dist >/dev/null 2>&1 &
+          sleep 1
+          CLAUDETTE_DOWNLOAD_URL=http://127.0.0.1:8765 CLAUDETTE_BIN_DIR="$RUNNER_TEMP/bin" CLAUDETTE_LIB_DIR="$RUNNER_TEMP/lib" scripts/install.sh
+          test "$("$RUNNER_TEMP/bin/claudette" +version)" = "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  e2e:
+    name: End-to-end tests (containers)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      # Ubuntu 24.04 keeps unconfined processes from creating user namespaces, which bubblewrap
+      # needs in the remote container.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: scripts/test.sh

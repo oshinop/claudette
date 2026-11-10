@@ -1,0 +1,19 @@
+# A remote machine to try claudette against by hand: the test image's `remote`, reachable from this
+# machine on 127.0.0.1:2222, with internet access and its own Claude Code login instead of the mock API.
+#   scripts/playground.sh up        (builds claudette, starts this, sets up ssh; see docs/testing.md)
+# A project of its own, so scripts/test.sh never touches it; the login lives in the `home` volume.
+name: claudette-playground
+
+services:
+  remote:
+    ports: ["127.0.0.1:2222:22"]
+    networks: [claudette, internet]
+    volumes:
+      - ./playground/sshd.conf:/etc/ssh/sshd_config.d/claudette.conf:ro
+      - home:/home/remote
+
+networks:
+  internet: {}
+
+volumes:
+  home:

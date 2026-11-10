@@ -61,3 +61,8 @@ adds the variables that send Claude Code to the mock API. With the mock, `scenar
 scripts its replies for prompts that contain `[[scenario:<id>]]`: each step is a tool call
 (`{"tool": "Bash", "input": {…}}`) or a text, which may quote `{{last_tool_result}}`. `ssh` opens a
 shell in the container, and `down` stops it (`down -v` also deletes the login and the ssh key).
+
+`scripts/bench-sessions.py [counts…]` runs that many `-p` sessions at once against the playground's
+mock API (1, 2, 4 and 8 by default), each on its own project with a Read and a Bash call that lasts 3
+seconds, and prints a table of each session's time and the peak memory on both machines, Claude
+Code's own processes counted apart from claudette's.

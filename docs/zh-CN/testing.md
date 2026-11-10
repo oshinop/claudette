@@ -45,3 +45,5 @@ cd ~/some/project && claudette -p "hi"
 ```
 
 `env` 输出 `CLAUDETTE_HOST`、`CLAUDETTE_SSH`，以及它构建的 `claudette` 的别名；`env mock` 还会添加让 Claude Code 使用 mock API 的变量。使用 mock 时，`scenario <id> '<steps>'` 可为包含 `[[scenario:<id>]]` 的提示词编排回复：每一步是一个 tool call（`{"tool": "Bash", "input": {…}}`）或一段文本，文本可以引用 `{{last_tool_result}}`。`ssh` 打开容器内的 shell，`down` 停止容器（`down -v` 还会删除登录信息和 ssh 密钥）。
+
+`scripts/bench-sessions.py [counts…]` 会针对 playground 的 mock API 同时运行指定数量的 `-p` 会话（默认 1、2、4、8 个），每个会话使用独立的项目，执行一次 Read 和一次持续 3 秒的 Bash 调用，然后输出表格：每个会话的耗时，以及两台机器上的内存峰值，其中 Claude Code 自身的进程与 claudette 的进程分开统计。

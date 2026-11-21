@@ -125,17 +125,6 @@ pub fn claude_command(config: &Config, script: &Script, args: &[String]) -> Stri
     format!("{REMOTE_PATH}\n{traps}\nset --\n{setup}\n\"$@\" {run}")
 }
 
-/// `env` as a file for a POSIX shell to source: one `export` per variable, the value quoted. Names a
-/// shell can't assign are left out.
-pub fn env_file(env: &BTreeMap<String, String>) -> String {
-    let assignable = |k: &str| k.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-    env.iter().filter(|(k, _)| assignable(k)).map(|(k, v)| format!("export {k}={}\n", shell_quote(v))).collect()
-}
-
-/// The remote command that saves its stdin as a file only the remote user can read, and prints the
-/// file's path.
-pub const SAVE_PRIVATE_FILE: &str = r#"umask 077 && f=$(mktemp "${TMPDIR:-/tmp}/claudette-env.XXXXXX") && cat >"$f" && printf '%s' "$f""#;
-
 pub fn ssh_argv(config: &Config, command: &str, tty: bool) -> Vec<String> {
     let mut argv = config.ssh.clone();
     argv.push(if tty { "-t" } else { "-T" }.into());
@@ -199,20 +188,6 @@ mod tests {
         assert_eq!(code, 0);
         let expected: Vec<String> = tricky.iter().map(|a| format!("<{a}>")).collect();
         assert_eq!(out.trim_end().split('\n').map(str::to_owned).collect::<Vec<_>>(), expected);
-    }
-
-    #[test]
-    fn an_env_file_sets_values_exactly_and_skips_names_a_shell_cannot_assign() {
-        let env = BTreeMap::from([
-            ("FOO".to_owned(), "bar baz' $HOME `date`\nnext".to_owned()),
-            ("EMPTY".to_owned(), String::new()),
-            ("BAD-NAME".to_owned(), "x".to_owned()),
-            ("1ST".to_owned(), "x".to_owned()),
-        ]);
-        let script = format!("{}\nprintf '%s|%s|%s' \"$FOO\" \"${{EMPTY-unset}}\" \"$(env | grep -c -e '^BAD-NAME=' -e '^1ST=')\"", env_file(&env));
-        let (code, out) = run_sh(&script, &tempdir());
-        assert_eq!(code, 0);
-        assert_eq!(out, "bar baz' $HOME `date`\nnext||0");
     }
 
     #[test]

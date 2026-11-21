@@ -55,13 +55,15 @@ Hosts such as T3 Code and Paseo don't have these; they apply when you run `claud
 
 ## MCP servers
 
-- Sign in to an OAuth server with `claude mcp login`; `/mcp` in a session can't do it. A server you
-  add with `--remote` can't sign in at all.
+- Sign in to a server that runs on the local machine with `claude mcp login`; `/mcp` in a session
+  can't do it. A server you add with `--remote` signs in through `/mcp` in a terminal session.
 - In SDK hosts such as T3 Code, those servers' prompts aren't offered as slash commands. Terminal
   and `-p` sessions do offer them.
 - Servers you add with `--remote` run on the remote machine inside the sandbox. They see the project
   and Claude Code's own state, and nothing else in the remote home folder. `claude mcp list` and
   `claude mcp get` check them from the remote home folder, outside the sandbox.
+- Servers you add with `--remote` get no forwarded ssh agent (`SSH_AUTH_SOCK`): the remote claude
+  runs without ssh's variables.
 - `claude mcp serve` isn't available.
 - The local machine's organization MCP policy isn't applied: `managed-mcp.json`, and
   `managedMcpServers`, `allowedMcpServers` and `deniedMcpServers` in its managed settings.

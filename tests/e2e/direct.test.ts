@@ -83,14 +83,14 @@ describe("claudette as claude, with -p", () => {
     expect(run.hooks.map((h) => h.decision?.behavior)).toEqual(["allow", "deny"]);
   });
 
-  test("with no local tools allowed, only the workspace, the sessions folder, the hook, the user configuration's saves, the browser relay and the inbox relay are served", async () => {
+  test("with no local tools allowed, only the workspace, the sessions folder, the hook, the user configuration's saves, the links-and-clipboard relay and the inbox relay are served", async () => {
     const dir = project();
     const run = claude(dir, ["-p", "title please", "--output-format", "json", "--tools", ""]);
     expect(run.result.result, run.out).toBe("ok");
     // The workspace (its SFTP server and the project's hook callbacks), the sessions folder,
     // claudette's own hook, which also reports whether the session is working or idle, and the
     // socket the Claude Code folder's saves come back on (this machine has no settings file to
-    // send), and the socket `$BROWSER` hands links to. The session's settings, the appended system
+    // send), and the socket links and the clipboard reach. The session's settings, the appended system
     // prompt and the MCP configuration, which holds only the inbox relay, come with the run's first
     // frames, off the remote command line.
     expect(JSON.parse(run.spawn).sockets).toBe(6);
@@ -487,6 +487,37 @@ describe("links the remote claude opens", () => {
     } finally {
       mcp(dir, "remove", "opener");
       onRemote("pkill -f 'listen(8765'");
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the remote claude sees no ssh session", () => {
+  test("a session and Claude Code's own commands run without ssh's variables, and pbcopy and pbpaste on the remote machine reach the local clipboard", async () => {
+    expect(Number(onRemote("env | grep -c '^SSH_'"))).toBeGreaterThan(0);
+    const server = installRemoteServer();
+    const bin = mkdtempSync(join(tmpdir(), "bin-"));
+    const clipboard = join(bin, "clipboard");
+    writeFileSync(join(bin, "xclip"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = -o ] && exec cat "${clipboard}"; done\ncat > "${clipboard}"\n`, { mode: 0o755 });
+    writeFileSync(clipboard, "from-local");
+    const dir = project();
+    const env = { ENABLE_TOOL_SEARCH: "false", PATH: `${bin}:${process.env.PATH}`, DISPLAY: ":0" };
+    try {
+      expect(mcp(dir, "add", "--remote", "--", "runner", "node", server).code).toBe(0);
+      const id = await scenario([
+        { tool: "run", input: { command: "echo ssh:$(env | grep -c '^SSH_'); echo pasted:$(pbpaste); printf from-remote | pbcopy && echo copied" } },
+        { text: "{{last_tool_result}}" },
+      ]);
+      const run = claude(dir, ["-p", `[[scenario:${id}]] run`, "--output-format", "json", "--allowedTools", "mcp__runner__run"], env);
+      expect(run.result.result, run.out).toBe("ssh:0\npasted:from-local\ncopied\n");
+      expect(readFileSync(clipboard, "utf8")).toBe("from-remote");
+
+      onRemote(`printf '#!/bin/sh\\necho ssh:$(env | grep -c "^SSH_") browser:\${BROWSER:+set}\\n' > /tmp/env-claude && chmod 755 /tmp/env-claude`);
+      const own = Bun.spawnSync(["claudette", "doctor"], { cwd: dir, env: { ...process.env, ...env, CLAUDETTE_REMOTE_CLAUDE: "/tmp/env-claude" }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      expect(own.stdout.toString(), own.stderr.toString()).toContain("ssh:0 browser:set");
+    } finally {
+      mcp(dir, "remove", "runner");
+      onRemote("rm -f /tmp/env-claude");
       rmSync(bin, { recursive: true, force: true });
     }
   });

@@ -329,26 +329,40 @@ impl SocketHub {
         Ok(path)
     }
 
-    pub fn serve_browser(&self, forwards: &mut Forwards, browser: Arc<crate::browser::Browser>) -> anyhow::Result<String> {
+    pub fn serve_desktop(&self, forwards: &mut Forwards, browser: Arc<crate::browser::Browser>) -> anyhow::Result<String> {
         let (path, listener) = self.listen()?;
         self.spawn(async move {
             while let Ok((conn, _)) = listener.accept().await {
                 let browser = browser.clone();
                 tokio::spawn(async move {
                     let (read, mut write) = conn.into_split();
+                    let mut read = BufReader::new(read);
                     let mut line = String::new();
-                    if BufReader::new(read.take(64 * 1024)).read_line(&mut line).await.is_err() {
+                    if (&mut read).take(64 * 1024).read_line(&mut line).await.is_err() {
                         return;
                     }
-                    trace("browser", line.trim());
-                    let reply = match browser.open(line.trim()).await {
-                        Ok(()) => "ok\n".to_owned(),
+                    let request = line.trim_end_matches('\n');
+                    trace("desktop", request);
+                    let reply = match request.split_once(' ').unwrap_or((request, "")) {
+                        ("open", url) => browser.open(url).await.map(|()| Vec::new()),
+                        ("copy", "") => {
+                            let mut data = Vec::new();
+                            match read.take(crate::clipboard::LIMIT).read_to_end(&mut data).await {
+                                Ok(_) => crate::clipboard::copy(&data).await.map(|()| Vec::new()),
+                                Err(e) => Err(format!("could not receive the copied text: {e}")),
+                            }
+                        }
+                        ("paste", "") => crate::clipboard::paste().await,
+                        _ => Err(format!("unknown request: {request}")),
+                    };
+                    let reply = match reply {
+                        Ok(body) => [b"ok\n".as_slice(), &body].concat(),
                         Err(e) => {
                             crate::log::warn(&e);
-                            format!("error: {e}\n")
+                            format!("error: {e}\n").into_bytes()
                         }
                     };
-                    let _ = write.write_all(reply.as_bytes()).await;
+                    let _ = write.write_all(&reply).await;
                     let _ = write.shutdown().await;
                 });
             }

@@ -77,6 +77,35 @@ pub fn enter(cwd: &Path) -> Script {
     Script { setup: enter_lines(cwd), cleanup: String::new() }
 }
 
+fn desktop_lines(socket: &str) -> Vec<String> {
+    let stand_in = |name: &str, request: &str, args: &str| {
+        let line = format!("exec \"$CLAUDETTE_HELPER\" __helper {request} {}{args}", shell_quote(socket));
+        format!("printf '%s\\n' '#!/bin/sh' {} >\"$T.bin/{name}\" || exit 1", shell_quote(&line))
+    };
+    vec![
+        "mkdir -m 700 \"$T.bin\" || exit 1".to_owned(),
+        stand_in("claudette-browser", "open", " \"$@\""),
+        stand_in("pbcopy", "copy", ""),
+        stand_in("pbpaste", "paste", ""),
+        "chmod 700 \"$T.bin\"/* && export BROWSER=\"$T.bin/claudette-browser\" PATH=\"$T.bin:$PATH\" || exit 1".to_owned(),
+    ]
+}
+
+pub fn enter_with_desktop(cwd: &Path, forwards: &Forwards, desktop: &str) -> Script {
+    let mut setup = vec![
+        format!("T={}", run_prefix(&forwards.run)),
+        "[ -n \"${CLAUDETTE_HELPER:-}\" ] || { echo 'claudette: no helper to reach the local machine' >&2; exit 1; }".to_owned(),
+    ];
+    setup.extend(desktop_lines(desktop));
+    setup.push(enter_lines(cwd));
+    let remove: Vec<String> = forwards.list.iter().map(|f| shell_quote(&f.remote)).chain(forwards.files.iter().map(|f| shell_quote(&f.remote))).collect();
+    let mut cleanup = vec!["rm -rf \"$T.bin\"".to_owned()];
+    if !remove.is_empty() {
+        cleanup.push(format!("rm -f {}", remove.join(" ")));
+    }
+    Script { setup: setup.join("\n"), cleanup: cleanup.join("; ") }
+}
+
 /// The sandbox for macOS (sandbox-exec): the home folder is closed except the workspace, Claude
 /// Code's own state, its installation, and the Keychain its login lives in.
 const MACOS_PROFILE: &str = r#"(version 1)
@@ -124,7 +153,7 @@ const MOUNT_ENDED: &str = "'claudette: a mount of this machine ended on the remo
 /// sessions folder's near end writes transcripts behind; the session ends once the laptop has
 /// confirmed the last of them (the near end's held warm start, `$T.sessions.warm.held`, goes then).
 pub fn mount(cwd: &Path, forwards: &Forwards, delivered: &Delivered) -> Script {
-    let Delivered { sftp, user, sessions, plugins, config, browser, .. } = delivered;
+    let Delivered { sftp, user, sessions, plugins, config, desktop, .. } = delivered;
     let work = format!("\"$HOME\"/{}", shell_quote(&remote_workdir(cwd)));
     // /tmp's real path (/private/tmp on macOS), as `mount` reports mount points.
     let temp = run_prefix(&forwards.run);
@@ -137,8 +166,7 @@ pub fn mount(cwd: &Path, forwards: &Forwards, delivered: &Delivered) -> Script {
         "mkdir -p \"$W\" \"$HOME/.claude\" || exit 1".to_owned(),
         "mkdir -m 700 \"$T.inbox\" && export CLAUDE_CODE_TMPDIR=\"$T.inbox\" || exit 1".to_owned(),
     ];
-    let opener = format!("exec \"$CLAUDETTE_HELPER\" __helper open {} \"$@\"", shell_quote(browser));
-    setup.push(format!("printf '%s\\n' '#!/bin/sh' {} >\"$T.browser\" && chmod 700 \"$T.browser\" && export BROWSER=\"$T.browser\" || exit 1", shell_quote(&opener)));
+    setup.extend(desktop_lines(desktop));
     // This machine's files for the Claude Code folder.
     setup.push("mkdir -m 700 \"$T.laptop\" \"$T.config\" || exit 1".to_owned());
     for (file, name) in [(&config.settings, "settings.json"), (&config.keybindings, "keybindings.json")] {
@@ -240,12 +268,12 @@ pub fn mount(cwd: &Path, forwards: &Forwards, delivered: &Delivered) -> Script {
         steps.push("rmdir \"$T.plugins\" 2>/dev/null".to_owned());
     }
     let mut remove: Vec<String> = ["\"$T", "\"$T.user", "\"$T.plugins", "\"$T.config", "\"$T.sessions"].iter().flat_map(|prefix| [format!("{prefix}.fifo\""), format!("{prefix}.err\"")]).collect();
-    remove.extend(["\"$T.config.log\"", "\"$T.sb\"", "\"$T.bwrap\"", "\"$T.ending\"", "\"$T.unmounted\"", "\"$T.browser\""].map(str::to_owned));
+    remove.extend(["\"$T.config.log\"", "\"$T.sb\"", "\"$T.bwrap\"", "\"$T.ending\"", "\"$T.unmounted\""].map(str::to_owned));
     remove.extend(forwards.list.iter().map(|f| shell_quote(&f.remote)).chain(forwards.files.iter().map(|f| shell_quote(&f.remote))));
     // A near end that was stopped leaves its warm start held.
     remove.extend(forwards.files.iter().filter(|f| f.name.ends_with(".warm")).map(|f| shell_quote(&format!("{}.held", f.remote))));
     steps.push(format!("rm -f {}", remove.join(" ")));
-    steps.push("rm -rf \"$T.inbox\" \"$T.laptop\"".to_owned());
+    steps.push("rm -rf \"$T.inbox\" \"$T.laptop\" \"$T.bin\"".to_owned());
     Script { setup: setup.join("\n"), cleanup: steps.join("; ") }
 }
 

@@ -1,5 +1,6 @@
 mod args;
 mod browser;
+mod clipboard;
 mod commands;
 mod config;
 mod direct;

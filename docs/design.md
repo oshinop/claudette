@@ -7,7 +7,7 @@ claudette looks at its arguments and takes one of three paths:
 | Arguments | Path | How tools reach this machine |
 |---|---|---|
 | `--input-format stream-json --output-format stream-json`, which the Agent SDK passes | SDK relay | the SDK's control channel, on the same ssh connection |
-| Claude Code's own commands: `auth`, `doctor`, `--version`, `--help` and the rest (`mcp` is claudette's own, and `plugin` works on this machine's plugin store: see [MCP servers](#tools-settings-and-mcp-servers) and [Plugins](#plugins)) | passthrough, run remotely as is | not needed |
+| Claude Code's own commands: `auth`, `doctor`, `--version`, `--help` and the rest (`mcp` is claudette's own, and `plugin` works on this machine's plugin store: see [MCP servers](#tools-settings-and-mcp-servers) and [Plugins](#plugins)) | passthrough, run remotely as is under the helper | not needed; links and the clipboard reach this machine ([Links and the clipboard](#links-and-the-clipboard)) |
 | `+…`: claudette's own commands (`claudette +help`); the prefix is the `prefix` setting | here | not needed |
 | Anything else: interactive, a prompt, `-p` | direct | the helper on the remote machine as claude's stdio MCP server and hooks, connected to Unix sockets the holder serves there and carries back here |
 
@@ -102,9 +102,8 @@ Nothing private goes on the remote command line, which any user of the remote ma
 settings, the appended system prompt (your `CLAUDE.md` files, git status), the MCP configuration and
 the mounts' warm starts are files only the remote user can read, sent as frames ahead of it, written
 by the holder and removed at the end. The first connection sends them right behind its greeting,
-without waiting for the helper's. A command passed through as is (`claude auth`, `--version`) gets
-its environment from such a file, saved over ssh's stdin first, which it reads and removes before
-claude starts.
+without waiting for the helper's. A command passed through as is (`claude auth`, `--version`) runs
+under a holder the same way, with only its environment and the socket for links and the clipboard.
 
 When the connection drops (the local machine sleeps, the network changes, ssh dies), the session waits
 instead of ending:
@@ -362,12 +361,19 @@ paths (`installed_plugins.json`, `known_marketplaces.json`, the settings files) 
 paths and are written back with this machine's, so the store is what a local claude would have left.
 Nothing is installed on the remote machine.
 
-## Links
+## Links and the clipboard
 
-The run's setup writes `$T.browser`, a script that runs `__helper open <socket> <url>`, and exports
-it as `BROWSER`, so everything the remote claude starts inherits it. The helper sends the link over
-a socket forwarded to this machine, which opens only `http` and `https` and answers `ok` or the
-error; the helper prints the error and fails.
+The helper removes ssh's variables (`SSH_*`) from its environment as it starts, so the remote
+claude, and everything the helper and claude start, sees no ssh session. Claude Code then acts as it
+does at a desk: it opens links with `BROWSER` and, on macOS, copies with `pbcopy` instead of OSC 52.
+
+The run's setup writes three scripts to `$T.bin`, which goes first on `PATH`: `claudette-browser`,
+exported as `BROWSER`, runs `__helper open <socket> <url>`; `pbcopy` and `pbpaste` run
+`__helper copy <socket>` and `__helper paste <socket>`. The socket is forwarded to this machine. A
+request is one line, `open <url>`, `copy` (the copied text follows) or `paste`, and the answer is
+`ok` (then the clipboard, for `paste`) or the error, which the helper prints before failing. Only
+`http` and `https` links open. The clipboard here is `pbcopy` and `pbpaste` on macOS, and on Linux
+wl-clipboard in a Wayland session or xclip or xsel in an X11 one.
 
 Here the link opens in the first of Chrome, Chromium, Brave, Edge and Firefox that is installed,
 with a profile for each remote host in `~/.config/claudette/browser/<browser>-<host>`, where

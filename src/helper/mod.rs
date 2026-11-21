@@ -58,6 +58,7 @@ pub fn inbox_server(run: &str) -> Map<String, Value> {
 
 /// `claudette __helper …`: runs on the remote machine; returns the exit code.
 pub fn main(args: &[String]) -> i32 {
+    forget_ssh_session();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a tokio runtime");
     match (args.first().map(String::as_str), args.get(1)) {
         (Some("version"), _) => {
@@ -72,12 +73,20 @@ pub fn main(args: &[String]) -> i32 {
         (Some("hook"), Some(rules)) if args.len() == 3 => runtime.block_on(holder::hook(rules, &args[2])),
         (Some("config"), _) => runtime.block_on(config::serve(&args[1..])),
         (Some("probe"), None) => runtime.block_on(probe()),
-        (Some("open"), Some(socket)) if args.len() == 3 => runtime.block_on(open(socket, &args[2])),
+        (Some("open"), Some(socket)) if args.len() == 3 && !args[2].contains('\n') => runtime.block_on(desktop(socket, &format!("open {}", args[2]), false)),
+        (Some("copy"), Some(socket)) if args.len() == 2 => runtime.block_on(desktop(socket, "copy", true)),
+        (Some("paste"), Some(socket)) if args.len() == 2 => runtime.block_on(desktop(socket, "paste", false)),
         (Some("sftp"), _) => runtime.block_on(near::serve(&args[1..])),
         _ => {
             eprintln!("claudette: unknown helper command");
             2
         }
+    }
+}
+
+fn forget_ssh_session() {
+    for (name, _) in std::env::vars_os().filter(|(name, _)| name.to_str().is_some_and(|n| n.starts_with("SSH_"))) {
+        unsafe { std::env::remove_var(name) };
     }
 }
 
@@ -98,19 +107,33 @@ async fn probe() -> i32 {
     0
 }
 
-async fn open(socket: &str, url: &str) -> i32 {
+async fn desktop(socket: &str, request: &str, send_stdin: bool) -> i32 {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let Ok(mut conn) = tokio::net::UnixStream::connect(socket).await else {
-        eprintln!("claudette: the session's browser relay is gone");
+        eprintln!("claudette: the session's link to the local machine is gone");
         return 1;
     };
-    let mut reply = String::new();
-    if conn.write_all(format!("{url}\n").as_bytes()).await.is_err() || conn.read_to_string(&mut reply).await.is_err() {
-        eprintln!("claudette: the session's browser relay did not answer");
+    let mut reply = Vec::new();
+    let sent = async {
+        conn.write_all(format!("{request}\n").as_bytes()).await?;
+        if send_stdin {
+            tokio::io::copy(&mut tokio::io::stdin(), &mut conn).await?;
+        }
+        conn.shutdown().await?;
+        conn.read_to_end(&mut reply).await
+    };
+    if sent.await.is_err() {
+        eprintln!("claudette: the local machine did not answer");
         return 1;
     }
-    match reply.trim().strip_prefix("error: ") {
-        None if reply.trim() == "ok" => 0,
+    let newline = reply.iter().position(|&b| b == b'\n').unwrap_or(reply.len());
+    let (status, body) = (String::from_utf8_lossy(&reply[..newline]), reply.get(newline + 1..).unwrap_or_default());
+    match status.strip_prefix("error: ") {
+        None if status == "ok" => {
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            i32::from(out.write_all(body).and_then(|()| out.flush()).is_err())
+        }
         Some(error) => {
             eprintln!("claudette: {error}");
             1

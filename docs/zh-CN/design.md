@@ -8,7 +8,7 @@ claudette 根据参数选择以下路径之一：
 | 参数 | 路径 | tool 如何访问本机 |
 |---|---|---|
 | Agent SDK 传入的 `--input-format stream-json --output-format stream-json` | SDK 中继（relay） | 通过同一条 ssh 连接上的 SDK 控制通道 |
-| Claude Code 自身的命令：`auth`、`doctor`、`--version`、`--help` 等（`mcp` 由 claudette 自行处理，`plugin` 操作本机的插件存储：参见 [MCP server](#tools-settings-and-mcp-servers)和[插件](#plugins)） | 透传，在远程机器上原样运行 | 不需要 |
+| Claude Code 自身的命令：`auth`、`doctor`、`--version`、`--help` 等（`mcp` 由 claudette 自行处理，`plugin` 操作本机的插件存储：参见 [MCP server](#tools-settings-and-mcp-servers)和[插件](#plugins)） | 透传，在远程机器上由辅助程序原样运行 | 不需要；链接和剪贴板会到达本机（[链接和剪贴板](#links-and-the-clipboard)） |
 | `+…`：claudette 自身的命令（`claudette +help`）；前缀由 `prefix` 设置决定 | 本机 | 不需要 |
 | 其他情况：交互模式、提示词、`-p` | 直连 | 远程机器上的辅助程序（helper）作为 claude 的 stdio MCP server 和 hook，连接到守护进程（holder）在远端提供并转回本机的 Unix socket |
 
@@ -49,7 +49,7 @@ claudette 根据参数选择以下路径之一：
 
 每次运行时，辅助程序都会启动一个脱离 ssh 的守护进程，将状态保存在 `/tmp/claudette-<run>.*` 中（权限为 0600，结束时移除）。守护进程运行 claude（交互界面使用它自己持有的终端，其他情况使用管道），并提供本次运行的 Unix socket：本地 tool、权限 hook、挂载和设置回调。所有内容都通过 ssh 自身的 stdio 传输，采用双方分别确认的编号帧，而不是 `ssh -R` 转发，因此某次运行崩溃时，不会在共享 ssh 连接上留下任何东西。
 
-私密内容不会出现在远程命令行上，因为远程机器上的任何用户都能读取命令行（`ps`）。claude 的环境随本次运行的第一帧到达，由守护进程设置；会话设置、追加的系统提示词（你的 `CLAUDE.md` 文件、git 状态）、MCP 配置和挂载预热数据则是仅远程用户可读的文件，在启动帧之前以帧形式发送，由守护进程写入，结束时移除。首次连接会在自己的问候消息之后立即发送它们，无需等待辅助程序的问候消息。原样透传的命令（`claude auth`、`--version`）也从这种文件获取环境：先通过 ssh 的 stdin 保存，再在 claude 启动前读取并移除。
+私密内容不会出现在远程命令行上，因为远程机器上的任何用户都能读取命令行（`ps`）。claude 的环境随本次运行的第一帧到达，由守护进程设置；会话设置、追加的系统提示词（你的 `CLAUDE.md` 文件、git 状态）、MCP 配置和挂载预热数据则是仅远程用户可读的文件，在启动帧之前以帧形式发送，由守护进程写入，结束时移除。首次连接会在自己的问候消息之后立即发送它们，无需等待辅助程序的问候消息。原样透传的命令（`claude auth`、`--version`）同样在守护进程下运行，只带上它的环境以及用于链接和剪贴板的 socket。
 
 连接中断时（本地机器休眠、网络切换、ssh 终止），会话会等待，而不是结束：
 
@@ -156,10 +156,12 @@ claude mcp remove docs
 
 `claude plugin …`（install、enable、marketplaces 等）使用远程机器的 Claude Code 操作本机存储：本机的暂存目录通过 SFTP 提供并挂载到 `/tmp/claudette-<run>.store`，作为它的 Claude Code 目录，其中 `plugins` 和 `settings.json` 指向 `~/.claude` 中的对应内容，它写入该目录的其他所有内容都会在结束时丢弃；命令在暂存目录的 `project` 中运行，该目录的 `.claude/settings.json` 和 `settings.local.json` 指向此项目的对应文件（用于 `--scope project` 和 `local`）。命令指定的本地目录（`marketplace add ./market`），以及存储已记录的本地市场，会以只读方式挂载在旁边。记录路径的文件（`installed_plugins.json`、`known_marketplaces.json`、设置文件）读取时使用挂载路径，写回时使用本机路径，因此最终存储与本地 claude 操作后的结果一致。远程机器上不会安装任何东西。
 
-<a id="links"></a>
-## 链接
+<a id="links-and-the-clipboard"></a>
+## 链接和剪贴板
 
-本次运行的准备脚本会写入 `$T.browser`（一个运行 `__helper open <socket> <url>` 的脚本），并将其导出为 `BROWSER`，因此远程 claude 启动的所有程序都会继承它。辅助程序通过转发到本机的 socket 发送链接；本机只打开 `http` 和 `https` 链接，并回复 `ok` 或错误，辅助程序会输出错误并以失败状态退出。
+辅助程序启动时会从自己的环境中移除 ssh 的变量（`SSH_*`），因此远程 claude 以及辅助程序和 claude 启动的所有程序都看不到 ssh 会话。于是 Claude Code 的行为与在本机桌面上相同：用 `BROWSER` 打开链接，在 macOS 上用 `pbcopy` 而不是 OSC 52 复制。
+
+本次运行的准备脚本会在 `$T.bin` 中写入三个脚本，并把该目录放在 `PATH` 最前面：导出为 `BROWSER` 的 `claudette-browser` 运行 `__helper open <socket> <url>`；`pbcopy` 和 `pbpaste` 分别运行 `__helper copy <socket>` 和 `__helper paste <socket>`。该 socket 转发到本机。请求只有一行：`open <url>`、`copy`（其后是复制的文本）或 `paste`；回复为 `ok`（`paste` 时其后是剪贴板内容）或错误，辅助程序会输出错误并以失败状态退出。只会打开 `http` 和 `https` 链接。本机的剪贴板在 macOS 上是 `pbcopy` 和 `pbpaste`，在 Linux 上，Wayland 会话使用 wl-clipboard，X11 会话使用 xclip 或 xsel。
 
 在本机，链接在 Chrome、Chromium、Brave、Edge 和 Firefox 中第一个已安装的浏览器里打开，每台远程主机使用 `~/.config/claudette/browser/<浏览器>-<主机>` 中的单独配置文件，其中 `<主机>` 是主机名 SHA-256 的前 12 位十六进制数字。浏览器经由到该主机的 `ssh -N -D` 联网：这是一个 SOCKS5 代理，监听保存在配置文件中（`claudette-proxy-port`）的回环端口，因为运行中的浏览器会一直使用启动时的代理。该 ssh 连接是独立的，不使用共享连接，也从不提示输入。Chromium 对回环地址也使用代理（`--proxy-bypass-list=<-loopback>`），域名通过代理解析；WebRTC 不在代理之外发送 UDP，QUIC、后台联网、组件更新、同步和崩溃报告均关闭。Firefox 通过 `user.js` 获得同样的设置：DNS 经代理远程解析，关闭 DNS over HTTPS，`localhost` 也走代理，不直接回退，关闭 WebRTC、预取、HTTP/3 和遥测。每个打开过链接的会话都会在配置文件中（在锁的保护下）记录自己（`claudette-sessions/<pid>`）；代理在其中最后一个会话结束时停止，下一个链接会再次启动它。
 

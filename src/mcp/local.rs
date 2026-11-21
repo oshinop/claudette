@@ -1,5 +1,3 @@
-//! The local tools as one MCP server. claude calls it over the relay; the tools run here.
-
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -14,12 +12,10 @@ use crate::mount::workdir::PathMap;
 pub struct LocalTools {
     ws: Arc<Workspace>,
     tools: Vec<ToolDefinition>,
-    /// claude runs in the mounted workspace and may name files by their path there.
     paths: PathMap,
 }
 
 impl LocalTools {
-    /// `names`: the tools the caller allows, out of the ones claudette replaces.
     pub fn new(ws: Arc<Workspace>, names: &[&str]) -> LocalTools {
         let paths = PathMap::new(&ws.root);
         LocalTools { ws, tools: tools::definitions().into_iter().filter(|t| names.contains(&t.name)).collect(), paths }
@@ -38,7 +34,6 @@ impl LocalTools {
                 if let Some(annotations) = &t.annotations {
                     entry["annotations"] = annotations.clone();
                 }
-                // Never deferred behind tool search: these are claude's core tools.
                 entry["_meta"] = json!({ "anthropic/alwaysLoad": true });
                 entry
             })
@@ -46,7 +41,6 @@ impl LocalTools {
         json!({ "tools": tools })
     }
 
-    /// The handshake claude would otherwise fetch over the network, sent once with `initialize`.
     pub fn manifest(&self) -> Value {
         json!({ "initializeResult": self.initialize_result(LATEST_PROTOCOL_VERSION), "toolsListResult": self.tools_list_result() })
     }

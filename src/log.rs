@@ -1,5 +1,3 @@
-//! The optional frame log (`CLAUDETTE_LOG`) and warnings.
-
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
@@ -11,24 +9,19 @@ pub fn open(path: Option<String>) {
     let _ = LOG_FILE.set(path);
 }
 
-/// Whether a frame log is open; lets callers skip building a line nobody records.
 pub fn enabled() -> bool {
     matches!(LOG_FILE.get(), Some(Some(_)))
 }
 
-/// Records one line crossing the relay. `dir`: host→claude ("in"), claude→host ("out"), or a note.
 pub fn trace(dir: &str, line: &str) {
     let Some(Some(path)) = LOG_FILE.get() else { return };
     let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let entry = serde_json::json!({ "t": t as u64, "pid": std::process::id(), "dir": dir, "line": line });
-    // A broken log must never break the session.
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{entry}");
     }
 }
 
-/// Warnings held back while claude's interface owns the terminal: written there, they would land in
-/// the middle of its screen. `None` while nothing is held.
 static HELD: Mutex<Option<Vec<String>>> = Mutex::new(None);
 
 pub fn warn(message: &str) {
@@ -36,7 +29,6 @@ pub fn warn(message: &str) {
     stderr_line(&format!("claudette: {message}"));
 }
 
-/// Writes a line to stderr, or holds it with the warnings while claude's interface owns the terminal.
 pub fn stderr_line(line: &str) {
     match HELD.lock().unwrap().as_mut() {
         Some(held) => held.push(line.to_owned()),
@@ -44,7 +36,6 @@ pub fn stderr_line(line: &str) {
     }
 }
 
-/// Holds warnings until the returned guard is dropped, which writes them out.
 pub fn hold_warnings() -> HeldWarnings {
     HELD.lock().unwrap().get_or_insert_with(Vec::new);
     HeldWarnings

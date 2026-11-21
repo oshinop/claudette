@@ -1,21 +1,3 @@
-//! `__helper config`: the remote claude's Claude Code folder (`CLAUDE_CONFIG_DIR`), served over SFTP on
-//! stdio for `sshfs -o passive` to mount. One folder over several:
-//!
-//! - **this machine's** user configuration: `settings.json` and `keybindings.json`, copies the laptop
-//!   sent at start, and its skills, agents, commands and output styles, from the read-only
-//!   user-content mount. A save of either file is also sent back to the laptop, which writes it into
-//!   its own `~/.claude` (see [`crate::userconfig`]). So each laptop's sessions use its own
-//!   configuration, and the remote machine's own `~/.claude/settings.json` is never involved.
-//! - the workspace's sessions folder, `projects/<key>`: this machine's, from the sessions mount.
-//! - the remote user's **global state**, `~/.claude.json` (onboarding, folder trust, the account).
-//! - everything else from the remote user's real **`~/.claude`**: history, sessions, plugins, caches.
-//!
-//! Login and state stay shared with every laptop and with claude run on the remote machine itself;
-//! the login is not in this folder at all (`CLAUDE_SECURESTORAGE_CONFIG_DIR` keeps it in its usual
-//! place). Claude Code saves by writing `<file>.tmp.<pid>.<hex>` and renaming it over, and locks with
-//! `<file>.lock`: those go wherever `<file>` goes, so a save stays on one side. It refuses to write
-//! through a symlink, which is why this is a folder of real files rather than links into the others.
-
 use std::collections::HashMap;
 use std::fs::{File as FsFile, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -25,11 +7,8 @@ use russh_sftp::protocol::{Attrs, Data, File, FileAttributes, Handle, Name, Open
 
 use crate::mount::sftp::{io_status, next_batch, ok};
 
-/// The laptop's files, saved back to it.
 pub const LAPTOP_FILES: [&str; 2] = ["settings.json", "keybindings.json"];
-/// The laptop's folders, from the user-content mount, read-only.
 pub const LAPTOP_FOLDERS: [&str; 4] = ["skills", "agents", "commands", "output-styles"];
-/// The remote user's global state, kept beside `~/.claude` rather than in it.
 const GLOBAL: &str = ".claude.json";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -37,13 +16,10 @@ enum Side {
     State,
     Home,
     Laptop,
-    /// The workspace's sessions folder, `projects/<key>`: this machine's, mounted on its own.
     Sessions,
-    /// The laptop's skills, agents, commands and output styles.
     User,
 }
 
-/// A name with Claude Code's temporary and lock suffixes taken off: `x.tmp.123.abc` and `x.lock` are `x`.
 fn stem(name: &str) -> &str {
     let name = name.strip_suffix(".lock").unwrap_or(name);
     match name.find(".tmp.") {
@@ -72,31 +48,21 @@ fn attrs(meta: &std::fs::Metadata) -> FileAttributes {
 }
 
 enum Open {
-    /// A file, and the laptop file it saves when it was opened for writing.
     File(FsFile, Option<String>),
     Dir(Vec<File>),
 }
 
-/// Where each side's files are, on the remote machine.
 pub struct Roots {
-    /// The remote user's `~/.claude`.
     pub state: PathBuf,
-    /// The remote user's home, for `~/.claude.json`.
     pub home: PathBuf,
-    /// The laptop's copies of its settings and keybindings.
     pub laptop: PathBuf,
-    /// The sessions mount.
     pub sessions: PathBuf,
-    /// The user-content mount's `.claude`.
     pub user: PathBuf,
 }
 
 pub struct Config {
-    /// By side, in [`Side`]'s order.
     roots: [PathBuf; 5],
-    /// The workspace's project key: `projects/<key>` is the sessions side.
     key: String,
-    /// The forwarded socket the laptop takes saves on.
     sink: PathBuf,
     sent: u64,
     handles: HashMap<String, Open>,
@@ -119,7 +85,6 @@ impl Config {
         &self.roots[side as usize]
     }
 
-    /// A client path as a path below the root; `..` stops at the root.
     fn relative(path: &str) -> PathBuf {
         let mut out = PathBuf::new();
         for c in Path::new(path).components() {
@@ -134,9 +99,6 @@ impl Config {
         out
     }
 
-    /// The side and local path of a client path, and its first component. The sessions folder is
-    /// served from its own mount rather than mounted inside this one: macFUSE refuses a mount on a
-    /// macFUSE volume.
     fn route(&self, path: &str) -> (Side, PathBuf, String) {
         let rel = Self::relative(path);
         let first = rel.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
@@ -148,8 +110,6 @@ impl Config {
         (side, local, first)
     }
 
-    /// The local path for a change: on the laptop side, only its two files (and their temporary
-    /// files and locks) may change; its folders are the user's, read-only here.
     fn writable(&self, path: &str) -> Result<(PathBuf, Option<String>), StatusCode> {
         let (side, local, first) = self.route(path);
         match side {
@@ -166,9 +126,6 @@ impl Config {
         self.next.to_string()
     }
 
-    /// Sends a saved laptop file back to the laptop: its name and a sequence number on the first
-    /// line, then its bytes. Nothing waits for an answer, so a save never waits on the network; the
-    /// link delivers it once the laptop is back.
     fn send(&mut self, name: &str) {
         let Ok(bytes) = std::fs::read(self.root(Side::Laptop).join(name)) else { return };
         self.sent += 1;
@@ -234,7 +191,6 @@ impl russh_sftp::server::Handler for Config {
             let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(atime.into());
             let mt = std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime.into());
             let times = std::fs::FileTimes::new().set_accessed(at).set_modified(mt);
-            // A lock is a folder: proper-lockfile refreshes its mtime to say it is still held.
             let _ = FsFile::open(&local).and_then(|f| f.set_times(times));
         }
         if a.size.is_some()
@@ -314,7 +270,6 @@ impl russh_sftp::server::Handler for Config {
             }
         };
         if first.is_empty() {
-            // The root: each side's own names, the remote ones the laptop's take the place of left out.
             std::fs::read_dir(self.root(Side::State)).map_err(|e| io_status(&e))?;
             add(self.root(Side::State), &|n| side_of(n) == Side::State);
             add(self.root(Side::Home), &|n| side_of(n) == Side::Home);
@@ -370,7 +325,6 @@ impl russh_sftp::server::Handler for Config {
     }
 }
 
-/// stdin that says when it ends: russh-sftp serves on a task of its own and returns at once.
 struct Watched<R> {
     inner: R,
     done: Option<tokio::sync::oneshot::Sender<()>>,
@@ -390,8 +344,6 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Watched<R> {
     }
 }
 
-/// `__helper config <remote ~/.claude> <remote home> <laptop copies> <sink socket> <project key>
-/// <sessions mount> <user-content .claude>`: serves until sshfs closes its end.
 pub async fn serve(args: &[String]) -> i32 {
     let [state, home, laptop, sink, key, sessions, user] = args else {
         eprintln!("claudette: usage: __helper config <state> <home> <laptop> <sink> <key> <sessions> <user>");
@@ -420,7 +372,6 @@ mod tests {
     fn setup() -> Setup {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Short: the sink is a socket, whose path has room for about 100 bytes.
         let dir = std::env::temp_dir().join(format!("ctc-{}-{n}", std::process::id()));
         for d in ["claude/projects/-w-app", "home", "laptop", "user/skills/demo", "claude/skills/remote-only", "sessions"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
@@ -466,7 +417,6 @@ mod tests {
     async fn each_file_comes_from_its_side_and_a_laptop_save_goes_back() {
         let Setup { dir, mut config, sink } = setup();
         assert_eq!(names(&mut config, "/").await, [".claude.json", "projects", "settings.json", "skills"]);
-        // The laptop's settings and skills, never the remote user's own.
         let h = config.open(1, "/settings.json".into(), OpenFlags::READ, FileAttributes::empty()).await.unwrap().handle;
         assert_eq!(config.read(2, h, 0, 100).await.unwrap().data, br#"{"theme":"laptop's"}"#);
         let h = config.open(3, "/skills/demo/SKILL.md".into(), OpenFlags::READ, FileAttributes::empty()).await.unwrap().handle;
@@ -477,12 +427,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("claude/settings.json")).unwrap(), r#"{"theme":"remote's own"}"#);
         assert_eq!(sent(&sink), ["settings.json 1\n{\"theme\":\"light\"}"]);
 
-        // State and global state are the remote user's real files.
         save(&mut config, "/.claude.json", r#"{"hasCompletedOnboarding":true,"numStartups":2}"#).await;
         assert!(std::fs::read_to_string(dir.join("home/.claude.json")).unwrap().contains("numStartups"));
         config.mkdir(5, "/projects/-w-other".into(), FileAttributes::empty()).await.unwrap();
         assert!(dir.join("claude/projects/-w-other").is_dir());
-        // The workspace's sessions folder is this machine's, from its own mount.
         let h = config.open(6, "/projects/-w-app/s.jsonl".into(), OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::APPEND, FileAttributes::empty()).await.unwrap().handle;
         config.write(7, h.clone(), 0, b"{}\n".to_vec()).await.unwrap();
         config.close(8, h).await.unwrap();
@@ -500,7 +448,6 @@ mod tests {
         assert_eq!(config.remove(2, "/skills".into()).await.err(), Some(StatusCode::PermissionDenied));
         std::fs::write(dir.join("claude/history.jsonl"), "").unwrap();
         assert_eq!(config.rename(3, "/history.jsonl".into(), "/settings.json.tmp.1.abc".into()).await.err(), Some(StatusCode::OpUnsupported));
-        // A lock beside a laptop file is on the laptop side, and can be taken and released.
         config.mkdir(4, "/settings.json.lock".into(), FileAttributes::empty()).await.unwrap();
         assert!(dir.join("laptop/settings.json.lock").is_dir());
         config.rmdir(5, "/settings.json.lock".into()).await.unwrap();

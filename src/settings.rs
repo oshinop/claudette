@@ -1,22 +1,3 @@
-//! Claude Code settings from this machine, as the remote claude gets them.
-//!
-//! The project's `.claude/settings.json` and `.claude/settings.local.json` reach it through the
-//! mounted workspace, served through a view that adapts them, and whatever it writes back is turned
-//! back first. The user's `~/.claude/settings.json` reaches it as the session's Claude Code folder's
-//! settings file (see [`crate::userconfig`]), through the same view, without what belongs to this
-//! machine's login, plugins or paths. In the view:
-//!
-//! - a hook or status line command becomes a call back to this machine, where the command runs in
-//!   the project with the hook's input (paths and tool names made local). Its side effects, like a
-//!   formatter rewriting a file, happen here, where the files are.
-//! - a rule or matcher that names a replaced tool (`Write`, `Edit|Write`) also names the local
-//!   tool (`mcp__cc__Write`), which is the tool the remote claude has.
-//!
-//! Two hook events concern only this machine, so they fire here and never from the remote claude:
-//! CwdChanged, when the local Bash tool changes directory, and FileChanged, for the files its
-//! matchers name in the shell's directory. What SessionStart, Setup, CwdChanged and FileChanged
-//! hooks write to `CLAUDE_ENV_FILE` reaches the local Bash tool's later commands.
-
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -34,38 +15,29 @@ use crate::mount::workdir::PathMap;
 use crate::permissions::rules::{self, Behavior, PathRules, Source};
 use crate::ssh::shell_quote;
 
-/// Claude Code's default limit for a command hook.
 const DEFAULT_TIMEOUT: f64 = 60.0;
 
-/// The settings files the view adapts, relative to the project root.
 pub const SETTINGS_FILES: [&str; 2] = [".claude/settings.json", ".claude/settings.local.json"];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Hook,
-    /// A command whose output Claude Code shows as it is: the status lines, the `@` file suggestions.
     Display,
 }
 
-/// The settings keys that run a command for Claude Code's interface, all run on this machine.
 const DISPLAY_KEYS: [&str; 3] = ["statusLine", "subagentStatusLine", "fileSuggestion"];
 
 #[derive(Clone, PartialEq)]
 struct Callback {
     kind: Kind,
-    /// For a hook, its event and its group's matcher.
     event: String,
     matcher: Option<String>,
     command: String,
-    /// Exec form: the arguments, passed to `command` with no shell.
     args: Option<Vec<String>>,
     timeout: Option<f64>,
-    /// For a plugin's hook, the plugin's folders here.
     plugin: Option<PluginEnv>,
 }
 
-/// A plugin's folders on this machine and its options, which its hooks get as `CLAUDE_PLUGIN_ROOT`,
-/// `CLAUDE_PLUGIN_DATA` and `CLAUDE_PLUGIN_OPTION_<KEY>` (and `${user_config.KEY}` in exec form).
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginEnv {
     pub root: PathBuf,
@@ -73,14 +45,10 @@ pub struct PluginEnv {
     pub options: Vec<(String, String)>,
 }
 
-/// Project settings that choose plugins: the plugins come from this machine (see [`crate::plugins`]),
-/// so the remote claude never sees these, and would otherwise install the remote machine's.
 pub const PLUGIN_KEYS: [&str; 2] = ["enabledPlugins", "extraKnownMarketplaces"];
 
-/// Distinct env files for the hook runners of one process without a run folder (tests).
 static NEXT_ENV: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Which settings claude loads for the caller, from its `--setting-sources` (all when absent).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sources {
     pub user: bool,
@@ -100,7 +68,6 @@ impl Sources {
     }
 }
 
-/// This machine's Claude Code folder: `CLAUDE_CONFIG_DIR`, or `~/.claude`.
 pub fn user_dir() -> PathBuf {
     match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -115,8 +82,6 @@ fn read_settings(path: &Path) -> Option<Object> {
     }
 }
 
-/// The settings files claude loads, lowest precedence first, each with the directory its `/path`
-/// rules anchor at: user settings at the user's Claude Code folder, project and local at the project.
 fn loaded(root: &Path, s: Sources) -> Vec<(PathBuf, Object)> {
     let mut files = vec![];
     if s.user {
@@ -130,8 +95,6 @@ fn loaded(root: &Path, s: Sources) -> Vec<(PathBuf, Object)> {
     files.into_iter().filter_map(|(anchor, file)| read_settings(&file).map(|s| (anchor, s))).collect()
 }
 
-/// Claude Code's `respectGitignore` (true unless a settings file turns it off): whether its `@` file
-/// picker leaves out what git ignores. The workspace mount follows it.
 pub fn respects_gitignore(root: &Path) -> bool {
     loaded(root, Sources { user: true, project: true, local: true })
         .iter()
@@ -148,7 +111,6 @@ fn bash_content(rule: &str) -> Option<String> {
     rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')).map(str::to_owned)
 }
 
-/// Expands a directory as settings name it: `~/…` at the home folder, relative at the project.
 fn settings_dir(dir: &str, root: &Path) -> PathBuf {
     match dir.strip_prefix("~/") {
         Some(rest) => crate::config::home().join(rest),
@@ -156,10 +118,6 @@ fn settings_dir(dir: &str, root: &Path) -> PathBuf {
     }
 }
 
-/// What the settings claude loads mean for the tools on this machine, which claude cannot apply to
-/// them itself: `Bash(…)` rules, `Read(…)` and `Edit(…)` rules, `env` (for the commands, hooks and
-/// servers that run here) and `additionalDirectories`. The caller's `--settings` ranks last, and its
-/// `--allowedTools` and `--disallowedTools` count as rules too. Returns the path rules.
 pub fn apply_here(args: &mut ParsedArgs, root: &Path) -> PathRules {
     let mut layers = loaded(root, Sources::of(args));
     if let Some(caller) = &args.settings {
@@ -188,7 +146,6 @@ pub fn apply_here(args: &mut ParsedArgs, root: &Path) -> PathRules {
     let cli: Vec<(Behavior, String)> =
         args.allowed.iter().map(|r| (Behavior::Allow, r.clone())).chain(args.disallowed.iter().map(|r| (Behavior::Deny, r.clone()))).collect();
     sources.push((root.to_path_buf(), cli));
-    // Login and provider variables stay out: on this machine they belong to no claude.
     let _ = LOCAL_ENV.set(env.into_iter().filter(|(k, _)| !is_login_env(k)).collect());
     for (behavior, rule) in sources.iter().flat_map(|(_, rules)| rules) {
         match (behavior, rules::parse(rule)) {
@@ -210,14 +167,10 @@ pub fn apply_here(args: &mut ParsedArgs, root: &Path) -> PathRules {
 
 static LOCAL_ENV: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
 
-/// The settings' `env`, for the processes that start on this machine in claude's name: the Bash
-/// tool's commands, hooks and MCP servers. Claude Code sets it for every process it starts.
 pub fn local_env() -> &'static [(String, String)] {
     LOCAL_ENV.get().map_or(&[], Vec::as_slice)
 }
 
-/// The remote claude's settings with an ask rule for each local tool an ask path rule covers, so
-/// that a call to one reaches the permission check even when an allow rule covers the tool.
 pub fn with_asks(settings: Option<Object>, tools: &[&str]) -> Option<Object> {
     if tools.is_empty() {
         return settings;
@@ -235,24 +188,12 @@ pub fn with_asks(settings: Option<Object>, tools: &[&str]) -> Option<Object> {
     Some(settings)
 }
 
-/// Claude Code's switch for agent teams. Teammates get SendMessage whatever the tool list says, and on
-/// the remote machine it would reach every session there, so teams stay off.
 pub const AGENT_TEAMS: &str = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS";
 
-/// Claude Code's switch for agent view and background sessions. `/bg`, `←` on an empty prompt and
-/// "Move to background and exit" would hand the session to the remote machine's own background
-/// service, which outlives the run and its sockets: no local tools, no mounts behind it.
 pub const AGENT_VIEW: &str = "CLAUDE_CODE_DISABLE_AGENT_VIEW";
 
-/// The token file in the run's private inbox folder on the remote machine (`CLAUDE_CODE_TMPDIR`).
 pub const INBOX_TOKEN: &str = "token";
 
-/// What claudette adds to the remote claude's `--settings` in every session, which rank above the
-/// user's and the project's settings:
-/// - agent teams and agent view off, so their `env` cannot turn them back on;
-/// - a `SessionStart` hook that keeps claude's messaging token (exported to hooks) in the run's private
-///   inbox folder. A message for this session then opens with it, so claude takes the message as from
-///   its own child and delivers it whatever its permission mode, as it does a hook posting to it.
 pub fn session_settings(settings: Option<Object>) -> Option<Object> {
     let mut settings = settings.unwrap_or_default();
     let env = settings.entry("env").or_insert_with(|| json!({}));
@@ -276,8 +217,6 @@ pub fn session_settings(settings: Option<Object>) -> Option<Object> {
     Some(settings)
 }
 
-/// User settings that belong to this machine rather than to how the user wants Claude to work:
-/// its login (the remote machine has its own), its installed plugins and marketplaces, and paths.
 const MACHINE_KEYS: [&str; 11] = [
     "apiKeyHelper",
     "awsAuthRefresh",
@@ -292,43 +231,35 @@ const MACHINE_KEYS: [&str; 11] = [
     "pluginConfigs",
 ];
 
-/// Environment variables that choose or carry this machine's credentials and API provider.
 fn is_login_env(name: &str) -> bool {
     ["ANTHROPIC_", "AWS_", "GOOGLE_", "CLOUD_ML_", "VERTEX_", "AZURE_"].iter().any(|p| name.starts_with(p))
         || matches!(name, "CLAUDE_CODE_USE_BEDROCK" | "CLAUDE_CODE_USE_VERTEX" | "CLAUDE_CODE_USE_FOUNDRY" | "CLAUDE_CODE_OAUTH_TOKEN" | "CLAUDE_CODE_API_KEY_HELPER_TTL_MS")
 }
 
-/// The user's settings without what belongs to this machine.
 pub(crate) fn user_part(mut settings: Object) -> Object {
     for key in MACHINE_KEYS {
         settings.remove(key);
     }
-    // Variables as forwarding passes them, but the file's credentials stay with this machine's other
-    // login settings (apiKeyHelper and the like, above).
     if let Some(Value::Object(env)) = settings.get_mut("env") {
         env.retain(|name, _| !crate::ssh::machine_bound(name) && !crate::ssh::is_credential(name));
     }
-    // Directories on this machine; the remote claude cannot open them, and the local tools have --add-dir.
     if let Some(Value::Object(permissions)) = settings.get_mut("permissions") {
         permissions.remove("additionalDirectories");
     }
     settings
 }
 
-/// `Edit|Write` → `Edit|Write|mcp__cc__Edit|mcp__cc__Write`; `*` and others stay.
 fn widen_matcher(matcher: &str) -> String {
     let parts: Vec<&str> = matcher.split('|').collect();
     let added: Vec<String> = parts.iter().filter(|p| is_local_tool(p.trim())).map(|p| format!("{PREFIX}{}", p.trim())).filter(|p| !parts.contains(&p.as_str())).collect();
     if added.is_empty() { matcher.to_owned() } else { format!("{matcher}|{}", added.join("|")) }
 }
 
-/// The local tool names a widened matcher gained, removed again.
 fn narrow_matcher(matcher: &str) -> String {
     let parts: Vec<&str> = matcher.split('|').collect();
     parts.iter().filter(|p| !p.strip_prefix(PREFIX).is_some_and(|bare| is_local_tool(bare) && parts.contains(&bare))).copied().collect::<Vec<_>>().join("|")
 }
 
-/// Rule lists: a replaced tool's rule (`Write`) gains the local tool's (`mcp__cc__Write`).
 fn widen_rules(rules: &mut Vec<Value>) {
     let mut out = vec![];
     for rule in rules.drain(..) {
@@ -341,8 +272,6 @@ fn widen_rules(rules: &mut Vec<Value>) {
     *rules = out;
 }
 
-/// Rule lists back on this machine: local tool names become the built-in ones a local claude knows,
-/// with their parameters (`mcp__cc__Bash(npm test:*)` becomes `Bash(npm test:*)`).
 pub(crate) fn narrow_rules(rules: &mut Vec<Value>) {
     for rule in rules.iter_mut() {
         if let Some(bare) = rule.as_str().and_then(|r| r.strip_prefix(PREFIX)).filter(|b| is_local_tool(b.split('(').next().unwrap_or(b))) {
@@ -364,7 +293,6 @@ fn rule_lists(settings: &mut Object) -> Vec<&mut Vec<Value>> {
     }
 }
 
-/// Every command hook entry: (event, matcher group or hook, whether it is the group) as mutable objects.
 fn for_each_hook(settings: &mut Object, mut f: impl FnMut(&str, &mut Object, bool)) {
     let Some(Value::Object(events)) = settings.get_mut("hooks") else { return };
     for (event, groups) in events.iter_mut() {
@@ -384,36 +312,24 @@ fn serialize(settings: &Object) -> Vec<u8> {
     out
 }
 
-/// The events whose hooks may write `export` lines to `CLAUDE_ENV_FILE` for later Bash commands.
 const ENV_EVENTS: [&str; 4] = ["SessionStart", "Setup", "CwdChanged", "FileChanged"];
 
-/// The events claudette fires itself; the remote claude's own firings of them are ignored.
 const LOCAL_EVENTS: [&str; 2] = ["CwdChanged", "FileChanged"];
 
-/// The common hook input fields that stay the same across a session, kept for the local events.
 const COMMON_FIELDS: [&str; 3] = ["session_id", "transcript_path", "permission_mode"];
 
-/// How often the files FileChanged watches are looked at.
 const WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The commands of the session's settings (the project's and the user's), run here when the remote
-/// claude calls back or when CwdChanged or FileChanged fires here.
 pub struct Callbacks {
     root: PathBuf,
     paths: PathMap,
     nc: String,
-    /// The callback socket's path on the remote machine; set once it is forwarded.
     socket: OnceLock<String>,
     entries: Mutex<Vec<Callback>>,
-    /// `CLAUDE_ENV_FILE` for SessionStart and Setup hooks: kept for the whole session.
     session_env: PathBuf,
-    /// `CLAUDE_ENV_FILE` for CwdChanged and FileChanged hooks: emptied at each CwdChanged.
     dir_env: PathBuf,
-    /// The shell line that loads both, run before each local Bash command.
     env_source: String,
-    /// Files a hook asked FileChanged to watch (`watchPaths`), beside the matchers' own.
     watch_paths: Mutex<Vec<PathBuf>>,
-    /// [`COMMON_FIELDS`], as the last callback carried them.
     common: Mutex<Object>,
 }
 
@@ -448,8 +364,6 @@ impl Callbacks {
         }
     }
 
-    /// The shell lines that load what hooks wrote to `CLAUDE_ENV_FILE`; the local Bash tool runs
-    /// them before each command.
     pub fn env_source(&self) -> &str {
         &self.env_source
     }
@@ -480,8 +394,6 @@ impl Callbacks {
         (0..entries.len()).find(|i| self.callback_command(*i) == command).map(|i| entries[i].clone())
     }
 
-    /// Turns a command entry (a hook, a status line) into a call back to this machine. A hook in exec
-    /// form (`command` plus `args`) becomes the callback's shell command, its arguments kept here.
     fn call_back(&self, entry: &mut Object, kind: Kind, event: &str, matcher: Option<String>, plugin: Option<&PluginEnv>) {
         let Some(command) = str_field(entry, "command").map(str::to_owned) else { return };
         let args = entry.get("args").and_then(Value::as_array).map(|a| a.iter().map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string())).collect());
@@ -491,7 +403,6 @@ impl Callbacks {
         entry.insert("command".into(), json!(callback));
     }
 
-    /// The entry as it was before [`Callbacks::call_back`].
     fn put_back(&self, entry: &mut Object) {
         let Some(original) = str_field(entry, "command").and_then(|c| self.original(c)) else { return };
         entry.insert("command".into(), json!(original.command));
@@ -500,7 +411,6 @@ impl Callbacks {
         }
     }
 
-    /// Command hooks call back; matchers that name a replaced tool name the local one too.
     fn view_hooks(&self, settings: &mut Object, plugin: Option<&PluginEnv>) {
         let mut matcher = None;
         for_each_hook(settings, |event, entry, is_group| {
@@ -515,7 +425,6 @@ impl Callbacks {
         });
     }
 
-    /// The settings file as the remote claude sees it. A file that is not a JSON object passes unchanged.
     pub fn view(&self, bytes: &[u8]) -> Vec<u8> {
         let Ok(Value::Object(mut settings)) = serde_json::from_slice::<Value>(bytes) else { return bytes.to_vec() };
         rule_lists(&mut settings).into_iter().for_each(widen_rules);
@@ -531,14 +440,12 @@ impl Callbacks {
         serialize(&settings)
     }
 
-    /// A plugin's hooks file (`{"hooks": {…}}`) as the remote claude sees it.
     pub fn plugin_view(&self, bytes: &[u8], plugin: &PluginEnv) -> Vec<u8> {
         let Ok(Value::Object(mut file)) = serde_json::from_slice::<Value>(bytes) else { return bytes.to_vec() };
         self.view_hooks(&mut file, Some(plugin));
         serialize(&file)
     }
 
-    /// Hooks a plugin's manifest declares inline (the event map itself), as the remote claude sees them.
     pub fn plugin_hooks(&self, events: Object, plugin: &PluginEnv) -> Object {
         let mut file = Object::new();
         file.insert("hooks".into(), Value::Object(events));
@@ -549,7 +456,6 @@ impl Callbacks {
         }
     }
 
-    /// What the remote claude wrote, turned back into this machine's settings.
     pub fn restore(&self, bytes: &[u8]) -> Vec<u8> {
         let Ok(Value::Object(mut settings)) = serde_json::from_slice::<Value>(bytes) else { return bytes.to_vec() };
         rule_lists(&mut settings).into_iter().for_each(narrow_rules);
@@ -570,8 +476,6 @@ impl Callbacks {
         serialize(&settings)
     }
 
-    /// What the remote claude wrote to a project settings file, turned back, with the plugin
-    /// choices the view left out kept from the file as it is (`current`).
     pub fn restore_file(&self, bytes: &[u8], current: &Path) -> Vec<u8> {
         let restored = self.restore(bytes);
         let Ok(Value::Object(mut settings)) = serde_json::from_slice::<Value>(&restored) else { return restored };
@@ -586,7 +490,6 @@ impl Callbacks {
         serialize(&settings)
     }
 
-    /// Runs callback `index` with the remote claude's input; returns what goes back to it.
     pub async fn run(&self, index: usize, input: &[u8]) -> Vec<u8> {
         let Some(callback) = self.entries.lock().unwrap().get(index).cloned() else {
             return Vec::new();
@@ -608,7 +511,6 @@ impl Callbacks {
         if callback.kind == Kind::Display || code == 0 {
             return stdout;
         }
-        // The hook ran here, so its exit status becomes the JSON answer that means the same.
         let answer = if code == 2 {
             match callback.event.as_str() {
                 "PreToolUse" => json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": stderr } }),
@@ -621,11 +523,9 @@ impl Callbacks {
         answer.to_string().into_bytes()
     }
 
-    /// Runs one command with `input` on its stdin: exit code, stdout, stderr.
     async fn execute(&self, callback: &Callback, input: &str) -> (i32, Vec<u8>, String) {
         let Callback { event, command, args, timeout, plugin, .. } = callback;
         let limit = Duration::from_secs_f64(timeout.unwrap_or(DEFAULT_TIMEOUT).max(1.0));
-        // Exec form, as Claude Code runs it: no shell, the placeholders put in as plain text.
         let root = self.root.to_string_lossy();
         let place = |s: &str| {
             let s = s.replace("${CLAUDE_PROJECT_DIR}", &root);
@@ -686,7 +586,6 @@ impl Callbacks {
         (code, stdout, stderr)
     }
 
-    /// A hook's `watchPaths`, which replace the files FileChanged watches beside its matchers'.
     fn take_watch_paths(&self, stdout: &[u8]) {
         let Ok(Value::Object(out)) = serde_json::from_slice::<Value>(stdout) else { return };
         let paths = out.get("watchPaths").or_else(|| out.get("hookSpecificOutput").and_then(|h| h.get("watchPaths")));
@@ -695,7 +594,6 @@ impl Callbacks {
         }
     }
 
-    /// Runs the hooks of an event claudette fires itself, all at once, as Claude Code runs them.
     async fn fire(&self, event: &str, subject: Option<&str>, cwd: &Path, fields: Object) {
         let hooks: Vec<Callback> = {
             let entries = self.entries.lock().unwrap();
@@ -712,8 +610,6 @@ impl Callbacks {
         futures_util::future::join_all(hooks.iter().map(|hook| self.execute(hook, &input))).await;
     }
 
-    /// The local Bash tool moved from `old` to `new`: what CwdChanged and FileChanged hooks set for
-    /// the last folder goes, and CwdChanged fires.
     pub async fn cwd_changed(&self, old: &Path, new: &Path) {
         let _ = std::fs::remove_file(&self.dir_env);
         let mut fields = Object::new();
@@ -722,8 +618,6 @@ impl Callbacks {
         self.fire("CwdChanged", None, new, fields).await;
     }
 
-    /// The files FileChanged watches: each name its matchers list, in the shell's folder, and
-    /// whatever hooks asked for with `watchPaths`.
     fn watched(&self, cwd: &Path) -> BTreeSet<PathBuf> {
         let mut files: BTreeSet<PathBuf> = self.watch_paths.lock().unwrap().iter().cloned().collect();
         for entry in self.entries.lock().unwrap().iter().filter(|e| e.kind == Kind::Hook && e.event == "FileChanged") {
@@ -733,8 +627,6 @@ impl Callbacks {
         files
     }
 
-    /// Fires FileChanged for the watched files as they are created, modified or deleted, until the
-    /// session ends. A file newly watched (a new folder, a new hook) is taken as it is.
     pub async fn watch(&self, ws: &crate::tools::Workspace) {
         let mut seen: HashMap<PathBuf, Option<SystemTime>> = HashMap::new();
         let mut tick = tokio::time::interval(WATCH_INTERVAL);
@@ -762,9 +654,6 @@ impl Callbacks {
     }
 }
 
-/// Whether a hook group's matcher selects `subject` (none: the event has no matchers), by Claude
-/// Code's rules: empty or `*` matches all, letters, digits, `_` and `|` list exact names, anything
-/// else is a regular expression.
 fn matcher_matches(matcher: Option<&str>, subject: Option<&str>) -> bool {
     let (Some(matcher), Some(subject)) = (matcher, subject) else { return true };
     if matcher.is_empty() || matcher == "*" {
@@ -800,16 +689,13 @@ mod tests {
         assert_eq!(view["hooks"]["PostToolUse"][0]["matcher"], "Edit|Write|mcp__cc__Edit|mcp__cc__Write");
         let hooks = &view["hooks"]["PostToolUse"][0]["hooks"];
         assert_eq!(hooks[0]["command"], "{ printf '%s\\n' 0; cat; } | 'nc' -U '/tmp/s.sock'");
-        // An exec-form hook becomes a shell-form callback: its arguments stay here.
         assert_eq!(hooks[1]["command"], "{ printf '%s\\n' 1; cat; } | 'nc' -U '/tmp/s.sock'");
         assert!(hooks[1].get("args").is_none());
-        // An HTTP hook runs where claude runs.
         assert_eq!(hooks[2], original["hooks"]["PostToolUse"][0]["hooks"][2]);
         for key in DISPLAY_KEYS {
             assert!(view[key]["command"].as_str().unwrap().contains("-U '/tmp/s.sock'"), "{key}");
         }
 
-        // The remote claude adds a rule under the local tool's name and writes the file back.
         let mut written = view.clone();
         written["permissions"]["allow"].as_array_mut().unwrap().push(json!("mcp__cc__Edit"));
         let restored: Value = serde_json::from_slice(&cb.restore(written.to_string().as_bytes())).unwrap();
@@ -856,7 +742,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
         let cb = Callbacks::new(&dir, "nc");
-        // No shell: `$HOME` and the space stay as written; the placeholder is this machine's folder.
         cb.view(json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "printf", "args": ["%s|%s", "${CLAUDE_PROJECT_DIR}/x", "$HOME a"] }] }] } }).to_string().as_bytes());
         let out = cb.run(0, br#"{"hook_event_name":"Stop"}"#).await;
         assert_eq!(String::from_utf8(out).unwrap(), format!("{}/x|$HOME a", dir.display()));
@@ -882,7 +767,6 @@ mod tests {
             .to_string()
             .as_bytes(),
         );
-        // The remote claude fires SessionStart; its own CwdChanged and FileChanged go nowhere.
         for index in 0..3 {
             cb.run(index, br#"{"hook_event_name":"SessionStart","session_id":"s1"}"#).await;
         }
@@ -896,7 +780,6 @@ mod tests {
         let sub = dir.join("sub");
         assert_eq!(text(&call(&ws, "Bash", json!({ "command": "echo \"$S $D\"" })).await), format!("1 {}", sub.display()));
 
-        // `.envrc` is watched in the shell's folder; the hook gets the change, with the session's fields.
         tokio::time::sleep(WATCH_INTERVAL * 2).await;
         std::fs::write(sub.join(".envrc"), "b").unwrap();
         let changed = dir.join("changed.json");

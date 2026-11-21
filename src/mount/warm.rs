@@ -1,12 +1,3 @@
-//! A mount's warm start: what the remote end of the mount (the near cache, see
-//! [`crate::helper::near`]) knows before claude asks for anything. Made here, at the start of a run,
-//! by asking the mount's own SFTP server, so hidden names, settings views and plugin manifests are
-//! exactly what the mount serves; sent to the remote machine with the run's first frames.
-//!
-//! It holds the server's greeting, complete folder listings (which also say what is not there),
-//! attributes, and the contents of small files: what claude reads first from each mount, and what
-//! would otherwise cost it a round trip each, one after another.
-
 use std::collections::{HashMap, VecDeque};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -14,19 +5,11 @@ use futures_util::FutureExt;
 use russh_sftp::protocol::{File, FileAttributes, OpenFlags, StatusCode};
 use russh_sftp::server::Handler;
 
-/// Files up to this size have their contents included, when they are of the kinds Claude Code reads
-/// at start: markdown (skills, agents, commands, memory) and JSON (settings, manifests, hooks).
 const FILE_MAX: u64 = 64 * 1024;
-/// Contents of small files, in all, per mount: every byte of a warm start rides the session's start.
 const CONTENT_BUDGET: usize = 256 * 1024;
-/// Listings and small files together, per mount: no more folders are listed past this.
 const WARM_MAX: usize = 1 << 20;
-/// A folder with more entries than this is left to be listed on demand.
 const LISTING_MAX: usize = 2000;
-/// Folders listed, per mount.
 const FOLDERS_MAX: usize = 500;
-/// The files named in [`Plan::files`] (a transcript being resumed) may be this large together. The
-/// whole warm start travels in one frame of at most 16 MiB.
 const NAMED_FILE_MAX: u64 = 8 << 20;
 
 const VERSION: u8 = 1;
@@ -36,19 +19,13 @@ const LISTING: u8 = 4;
 const CONTENT: u8 = 5;
 const PATHS: u8 = 6;
 
-/// What a mount's warm start covers.
 #[derive(Default)]
 pub struct Plan<'a> {
-    /// Folders listed (every entry's attributes), not descended into.
     pub list: &'a [&'a str],
-    /// Folders listed with everything below them, small files' contents included.
     pub tree: &'a [&'a str],
-    /// Files whose attributes and contents are included, up to [`NAMED_FILE_MAX`].
     pub files: Vec<String>,
 }
 
-/// The parts of a [`crate::mount::workdir::PathMap`], for a remote end that writes transcripts the
-/// way this machine's sessions server does.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathParts {
     pub workdir: String,
@@ -57,20 +34,15 @@ pub struct PathParts {
     pub user_local: String,
 }
 
-/// A decoded warm start.
 #[derive(Default)]
 pub struct Warm {
-    /// The server's answer to INIT: its version and extensions.
     pub version: Option<(u32, HashMap<String, String>)>,
-    /// lstat results; `None`: no such file.
     pub attrs: Vec<(String, Option<FileAttributes>)>,
     pub listings: Vec<(String, Vec<File>)>,
     pub contents: Vec<(String, Vec<u8>)>,
     pub paths: Option<PathParts>,
 }
 
-/// Runs a handler call to its end. The servers answer from the file system without waiting on
-/// anything, so their futures are ready at once; one that is not is left out of the warm start.
 fn now<T, E>(call: impl Future<Output = Result<T, E>>) -> Option<T> {
     call.now_or_never().and_then(Result::ok)
 }
@@ -89,7 +61,6 @@ fn put_attrs(out: &mut BytesMut, attrs: &FileAttributes) {
     put_str(out, &bytes);
 }
 
-/// Reads a whole file through the server, up to `max` bytes; `None` if it is larger or unreadable.
 fn read_all<H: Handler>(handler: &mut H, path: &str, max: u64) -> Option<Vec<u8>> {
     let handle = now(handler.open(0, path.to_owned(), OpenFlags::READ, FileAttributes::empty()))?.handle;
     let mut data = Vec::new();
@@ -101,7 +72,6 @@ fn read_all<H: Handler>(handler: &mut H, path: &str, max: u64) -> Option<Vec<u8>
                     break false;
                 }
             }
-            // An empty read, or the server's EOF: the end. Any other error leaves it incomplete.
             Some(Ok(_)) => break true,
             Some(Err(e)) => break e.into().status_code == StatusCode::Eof,
             None => break false,
@@ -111,7 +81,6 @@ fn read_all<H: Handler>(handler: &mut H, path: &str, max: u64) -> Option<Vec<u8>
     complete.then_some(data)
 }
 
-/// Lists a folder through the server; `None` if it cannot be listed or is too big to send.
 fn list<H: Handler>(handler: &mut H, path: &str) -> Option<Vec<File>> {
     let handle = now(handler.opendir(0, path.to_owned()))?.handle;
     let mut files = Vec::new();
@@ -123,7 +92,6 @@ fn list<H: Handler>(handler: &mut H, path: &str) -> Option<Vec<File>> {
                     break false;
                 }
             }
-            // EOF, the only way a listing ends; any other error leaves it incomplete.
             Some(Err(e)) => break e.into().status_code == StatusCode::Eof,
             None => break false,
         }
@@ -132,7 +100,6 @@ fn list<H: Handler>(handler: &mut H, path: &str) -> Option<Vec<File>> {
     complete.then_some(files)
 }
 
-/// Asks `handler` for what `plan` covers and encodes the answers.
 pub fn snapshot<H: Handler>(handler: &mut H, plan: &Plan, paths: Option<&PathParts>) -> Vec<u8> {
     crate::mount::sftp::quietly(|| encode(handler, plan, paths))
 }
@@ -242,7 +209,6 @@ fn get_attrs(input: &mut Bytes) -> Option<FileAttributes> {
 }
 
 impl Warm {
-    /// Decodes a warm start; `None` if it is damaged.
     pub fn decode(bytes: &[u8]) -> Option<Warm> {
         let mut input = Bytes::copy_from_slice(bytes);
         let mut warm = Warm::default();
@@ -323,10 +289,8 @@ mod tests {
             names.sort();
             names
         };
-        // Hidden names stay hidden: the listing is the server's.
         assert_eq!(names("/"), [".claude", "src"]);
         assert_eq!(names("/.claude/skills/s"), ["SKILL.md"]);
-        // `/src` is listed only as an entry of `/`; it is not descended into.
         assert!(!warm.listings.iter().any(|(p, _)| p == "/src"));
         let content = |path: &str| warm.contents.iter().find(|(p, _)| p == path).map(|(_, c)| c.clone());
         assert_eq!(content("/.claude/skills/s/SKILL.md").as_deref(), Some(&b"skill"[..]));

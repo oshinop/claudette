@@ -1,11 +1,3 @@
-//! An MCP server the host configured for claude, run on this machine. A local stdio command or a
-//! server on localhost (an SDK host's own, for one) is out of the remote claude's reach, and headers
-//! can hold credentials; so the relay connects to it here and offers its complete MCP interface to
-//! claude as an SDK server.
-//!
-//! The client is MCP's wire protocol and nothing more: messages pass through as JSON, so resources,
-//! prompts, tools, completions and server notifications all reach claude unchanged.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -31,7 +23,6 @@ use crate::VERSION;
 
 type WsSink = futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, WsMessage>;
 
-/// A tool call may run as long as the local Bash tool's maximum, plus margin.
 const CALL_TIMEOUT: Duration = Duration::from_secs(660);
 
 const HELPER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -196,7 +187,6 @@ async fn refresh_oauth(name: &str, config: &Object, launch: &Launch, rejected: O
     store.refresh_rejected(rejected).await.map_err(|err| auth_failure(name, err))
 }
 
-/// Server-sent events from a growing buffer: (event, data, id) for each complete event.
 fn take_events(buffer: &mut String) -> Vec<(String, String, Option<String>)> {
     let mut events = vec![];
     loop {
@@ -344,7 +334,6 @@ impl Client {
         Ok(())
     }
 
-    /// Streamable HTTP servers may use a GET stream for messages that are not responses to POSTs.
     fn start_http_stream(self: &Arc<Self>) {
         let Transport::Http { url, headers, .. } = &self.transport else { return };
         let (url, headers) = (url.clone(), headers.clone());
@@ -387,7 +376,6 @@ impl Client {
         self.tasks.lock().unwrap().push(task);
     }
 
-    /// The legacy SSE transport: a GET stream whose first event names the URL to POST messages to.
     async fn connect_sse(url: &str, headers: Vec<(String, String)>, notify: Notify, roots: Value) -> Result<Arc<Client>, Failure> {
         let mut request = HTTP.get(url).header("accept", "text/event-stream");
         for (k, v) in &headers {
@@ -465,8 +453,6 @@ impl Client {
         Ok(client)
     }
 
-    /// One message from the server: a response completes its request; requests and notifications
-    /// from the server get their due.
     async fn receive(self: &Arc<Self>, text: &str) {
         let Ok(Value::Object(message)) = serde_json::from_str::<Value>(text) else { return };
         let method = message.get("method").and_then(Value::as_str).map(str::to_owned);
@@ -484,8 +470,6 @@ impl Client {
                 });
             }
             (Some(_), _) => {
-                // Notifications are not limited to tools: resource, prompt, progress and log
-                // updates are meaningful to Claude and must retain their original parameters.
                 (self.notify)(Value::Object(message));
             }
             _ => {}
@@ -538,7 +522,6 @@ impl Client {
         Ok(())
     }
 
-    /// Boxed: a server's request answered while a POST is streaming sends from inside `post`.
     fn send(self: &Arc<Self>, message: Value) -> futures_util::future::BoxFuture<'_, Result<(), Failure>> {
         Box::pin(async move {
             match &self.transport {
@@ -554,7 +537,6 @@ impl Client {
         })
     }
 
-    /// A request and its response: Ok(Ok(result)), or Ok(Err(error object)) when the server refused.
     async fn request(self: &Arc<Self>, method: &str, params: Value, cancel: &CancellationToken) -> Result<Result<Value, Value>, Failure> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
@@ -638,7 +620,6 @@ pub async fn probe(name: &str, config: &Object, launch: &Launch) -> Health {
 
 pub struct Bridge {
     pub name: String,
-    /// Identifies the configuration, so an unchanged server keeps its connection across `mcp_set_servers`.
     pub key: String,
     config: Object,
     launch: Launch,
@@ -651,7 +632,6 @@ impl Bridge {
         Bridge { name: name.to_owned(), key: Value::Object(config.clone()).to_string(), config, launch, notify: Mutex::new(None), client: tokio::sync::Mutex::new(None) }
     }
 
-    /// Where the server's own MCP notifications go.
     pub fn set_notify(&self, notify: Notify) {
         *self.notify.lock().unwrap() = Some(notify);
     }
@@ -688,7 +668,6 @@ impl Bridge {
                 let arguments = params.get("arguments").filter(|a| a.is_object()).cloned().unwrap_or(json!({}));
                 self.connect().await?.request(method, json!({ "name": name, "arguments": arguments }), cancel).await
             }
-            // Resources, prompts, completions and anything newer go to the server as they are.
             other => self.connect().await?.request(other, params.clone(), cancel).await,
         }
     }
@@ -698,8 +677,6 @@ impl Bridge {
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         let params = message.get("params").cloned().unwrap_or(json!({}));
         if id.is_none() || !message.contains_key("method") {
-            // Relay notifications have no response frame. Sending them unchanged keeps
-            // cancellation and every MCP-defined client notification useful to the server.
             if let Ok(client) = self.connect().await {
                 let _ = client.send(Value::Object(message.clone())).await;
             }

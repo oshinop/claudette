@@ -15,11 +15,9 @@
 #   scripts/playground.sh down [-v]       stop it; -v also deletes the login and the ssh key
 # ssh to the container uses its own config in target/playground; ~/.ssh is not read or changed.
 set -eu
-# The script names its own files in full, so it works from any folder.
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export COMPOSE_FILE="$ROOT/tests/docker/compose.yaml:$ROOT/tests/docker/playground.yaml"
 STATE="$ROOT/target/playground"
-# ssh's connection-sharing socket path must fit in 104 bytes, so it gets a short folder of its own.
 CONTROL="/tmp/claudette-playground-$(id -u)"
 
 die() { echo "playground: $*" >&2; exit 1; }
@@ -36,7 +34,6 @@ platform() {
 HERE=$(platform "$(uname -s)" "$(uname -m)")
 CLAUDETTE="$ROOT/dist/claudette-$HERE"
 
-# CLAUDETTE_SSH is split on spaces, so the config's path can't hold one.
 case "$STATE" in *[[:space:]]*) die "the repository's path has a space in it, which CLAUDETTE_SSH can't carry" ;; esac
 SSH="ssh -F $STATE/ssh_config"
 
@@ -61,7 +58,6 @@ up() {
   chmod 700 "$CONTROL"
   docker compose cp remote:/keys/id_ed25519 "$STATE/id_ed25519"
   chmod 600 "$STATE/id_ed25519"
-  # A rebuilt container has new host keys; the old ones would fail the check.
   rm -f "$STATE/known_hosts"
   cat >"$STATE/ssh_config" <<EOF
 Host playground
@@ -98,7 +94,6 @@ case "${1:-}" in
     docker compose exec -it -u remote remote claude auth login ;;
   scenario)
     [ "$#" -eq 3 ] || die "usage: scripts/playground.sh scenario <id> '<steps json>'"
-    # The mock API is on the containers' network only, so the request goes from inside.
     docker compose exec -T -e ID="$2" -e STEPS="$3" remote node -e '
       const fail = (message) => { console.error(`playground: ${message}`); process.exit(1); };
       let steps;

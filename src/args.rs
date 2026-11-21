@@ -1,5 +1,3 @@
-//! Reading claude's arguments and rewriting them for the remote claude.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -11,46 +9,29 @@ use crate::mcp::{LocalServer, Source};
 use crate::log::warn;
 use crate::names::{LOCAL_TOOLS, PREFIX, REMOTE_TOOLS, UNASKED_TOOLS, is_local_tool};
 
-/// What the caller asked of claude, with everything that names this machine taken out.
 #[derive(Default, Debug)]
 pub struct ParsedArgs {
-    /// Arguments that pass to the remote claude unchanged, in order (positional prompt included).
     pub rest: Vec<String>,
-    /// Local directories from `--add-dir`. The remote machine has none of them.
     pub add_dirs: Vec<PathBuf>,
     pub permission_mode: Option<String>,
-    /// `--name`, still passed to claude: what this machine's other sessions call this one.
     pub name: Option<String>,
-    /// The caller asked for transcript mirror frames itself (an SDK host with a sessionStore).
     pub host_mirror: bool,
-    /// MCP servers that run here: the caller's `--mcp-config`, then this machine's own configuration.
     pub config_servers: BTreeMap<String, LocalServer>,
-    /// MCP servers this machine's configuration places on the remote machine; the remote claude starts them.
     pub remote_servers: BTreeMap<String, Object>,
-    /// The caller passed `--strict-mcp-config`: only its own servers, none from configuration.
     pub strict_mcp: bool,
-    /// The caller's `--setting-sources`, when given.
     pub setting_sources: Option<String>,
-    /// Local tools some `Read(…)` or `Edit(…)` ask rule covers: their calls must reach a permission
-    /// check even when a rule or the mode would approve them.
     pub ask_tools: Vec<&'static str>,
-    /// Local tools a bare allow rule (`Edit`) approves, from the settings and `--allowedTools`.
     pub tool_allows: Vec<String>,
-    /// `--settings`, read from this machine when it names a file.
     pub settings: Option<Object>,
     pub append_system_prompt: Vec<String>,
-    /// The raw `--tools` value, when given.
     pub tools: Option<String>,
     pub allowed: Vec<String>,
     pub disallowed: Vec<String>,
-    /// The local tools this session may use: the caller's --tools and --disallowedTools applied.
     pub local_tools: Vec<&'static str>,
-    /// Bash rule contents from the caller's allow and deny lists (`git diff:*`).
     pub bash_allow: Vec<String>,
     pub bash_deny: Vec<String>,
 }
 
-/// `--flag=value` or `--flag value`; returns the flag name and the inline value, if any.
 fn split(token: &str) -> (&str, Option<&str>) {
     match token.find('=') {
         Some(eq) if token.starts_with("--") && eq > 0 => (&token[..eq], Some(&token[eq + 1..])),
@@ -58,7 +39,6 @@ fn split(token: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// True when the host speaks the SDK's stream-json protocol both ways.
 pub fn is_stream_json_session(argv: &[String]) -> bool {
     let value = |flag: &str| {
         for (i, token) in argv.iter().enumerate() {
@@ -72,9 +52,6 @@ pub fn is_stream_json_session(argv: &[String]) -> bool {
     value("--input-format").as_deref() == Some("stream-json") && value("--output-format").as_deref() == Some("stream-json")
 }
 
-/// Claude Code's own subcommands (`claude --help`), and flags that only print. They run remotely as is.
-/// `mcp` and `plugin` are handled here, and the background-session commands (`agents`, `attach`,
-/// `stop`, …) are refused, before this list is consulted.
 const COMMANDS: [&str; 11] = ["auth", "auto-mode", "doctor", "gateway", "import", "install", "purge", "setup-token", "ultrareview", "update", "upgrade"];
 const PRINT_ONLY: [&str; 4] = ["-v", "--version", "-h", "--help"];
 
@@ -82,7 +59,6 @@ pub fn is_claude_command(argv: &[String]) -> bool {
     argv.first().is_some_and(|a| COMMANDS.contains(&a.as_str())) || argv.iter().any(|a| PRINT_ONLY.contains(&a.as_str()))
 }
 
-/// Reads a `--mcp-config` / `--settings` value: inline JSON, or a path to a JSON file on this machine.
 fn read_json_value(flag: &str, value: &str, cwd: &Path) -> anyhow::Result<Value> {
     if value.trim_start().starts_with('{') {
         return serde_json::from_str(value).with_context(|| format!("{flag}: invalid JSON"));
@@ -177,7 +153,6 @@ pub fn parse_args(argv: &[String], cwd: &Path) -> anyhow::Result<ParsedArgs> {
         i += 1;
     }
 
-    // The caller's tool restrictions, as they would apply to the built-ins the local tools replace.
     let listed: Option<Vec<String>> = match p.tools.as_deref() {
         None | Some("default") => None,
         Some(list) => Some(rule_list(&[list.to_owned()])),
@@ -193,7 +168,6 @@ pub fn parse_args(argv: &[String], cwd: &Path) -> anyhow::Result<ParsedArgs> {
     Ok(p)
 }
 
-/// Lexically normalizes a path (`a/../b` → `b`) without touching the file system.
 pub fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -208,18 +182,12 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
-/// Extra arguments a mode adds for the remote claude.
 #[derive(Default)]
 pub struct RemoteExtras {
-    /// Ask claude for transcript mirror frames (SDK mode).
     pub mirror: bool,
-    /// The MCP config file on the remote machine. With or without it, claude uses no other servers.
     pub mcp_config: Option<String>,
-    /// The session's settings and the appended system prompt, as files on the remote machine: on
-    /// the command line, anyone there could read them (`ps`).
     pub settings_file: Option<String>,
     pub append_system_prompt_file: Option<String>,
-    /// The folder the session's plugins are mounted in on the remote machine, each loaded from it.
     pub plugin_dir: Option<String>,
 }
 
@@ -233,7 +201,6 @@ fn dedup(items: impl IntoIterator<Item = String>) -> Vec<String> {
     out
 }
 
-/// The remote claude's built-in tools: the allowlist, narrowed to the caller's `--tools` when given.
 fn remote_tools(p: &ParsedArgs) -> String {
     match p.tools.as_deref() {
         None | Some("default") => REMOTE_TOOLS.join(","),
@@ -241,8 +208,6 @@ fn remote_tools(p: &ParsedArgs) -> String {
     }
 }
 
-/// The settings claude loads, as the caller asked: the user's come from this machine through the
-/// session's own Claude Code folder, the project's through the workspace.
 fn remote_setting_sources(p: &ParsedArgs) -> String {
     match p.setting_sources.as_deref() {
         None => "user,project,local".into(),
@@ -250,10 +215,6 @@ fn remote_setting_sources(p: &ParsedArgs) -> String {
     }
 }
 
-/// The arguments for the remote claude: an allowlist of built-in tools, only the MCP servers
-/// claudette passes, the local read tools and the caller's bare local-tool approvals pre-approved
-/// under their MCP names, local paths taken out. Every added flag uses `--flag=value`, so none can
-/// swallow a positional prompt.
 pub fn remote_args(p: &ParsedArgs, extras: &RemoteExtras) -> Vec<String> {
     let mut args = p.rest.clone();
     if let Some(mode) = &p.permission_mode {
@@ -344,7 +305,6 @@ mod tests {
         assert_eq!(p.add_dirs, [PathBuf::from("/work/shared"), PathBuf::from("/abs")]);
         let out = remote_args(&p, &RemoteExtras { append_system_prompt_file: Some("/tmp/p.md".into()), mcp_config: Some("/tmp/x.json".into()), ..Default::default() });
         assert_eq!(out[..4], s(&["--model", "opus", "fix the bug", "--verbose"])[..]);
-        // A flag that takes no value cannot swallow anything either.
         assert!(out[4..].iter().all(|a| a.starts_with("--") && (a.contains('=') || a == "--strict-mcp-config")));
     }
 
@@ -362,7 +322,6 @@ mod tests {
         assert_eq!(investigate.bash_allow, ["git diff:*", "git log:*"]);
         assert_eq!(investigate.bash_deny, ["git * -o *"]);
         assert!(parse_args(&s(&["-p", "--tools", "", "title"]), Path::new("/w")).unwrap().local_tools.is_empty());
-        // The remote claude gets the caller's built-ins that are allowed there, and never the replaced ones.
         assert!(remote_args(&investigate, &RemoteExtras::default()).contains(&"--tools=".into()));
         let web = parse_args(&s(&["--tools", "Read,WebFetch,Monitor"]), Path::new("/w")).unwrap();
         assert!(remote_args(&web, &RemoteExtras::default()).contains(&"--tools=WebFetch".into()));

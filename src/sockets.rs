@@ -1,11 +1,3 @@
-//! Unix sockets on this machine that the run's holder mirrors on the remote machine: it listens at
-//! each one's remote path and carries every connection back here over the link (see
-//! [`crate::link`]). Also this run's own socket for the other sessions here. They sit in the run's
-//! folder, `claudette-<pid>-XXXXXX` in this user's runtime folder (see
-//! [`crate::config::runtime_dir`]). The folder is private to this user (mkdtemp makes it 0700), so
-//! only this user's processes can connect; on the remote end the holder makes its sockets under
-//! umask 077.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,19 +19,15 @@ use crate::tools::Workspace;
 
 pub type HookAnswer = Arc<dyn Fn(&Object) -> Value + Send + Sync>;
 
-/// A file delivered in the first frames of a run.
 pub struct RunFile {
     pub name: String,
     pub remote: String,
     pub data: Vec<u8>,
 }
 
-/// The sockets one run forwards to the remote machine, and the remote paths they get there.
 pub struct Forwards {
-    /// Unique to this run; names its files on the remote machine.
     pub run: String,
     pub list: Vec<crate::ssh::SocketForward>,
-    /// Files delivered before the session starts; contents never appear on a command line.
     pub files: Vec<RunFile>,
 }
 
@@ -52,14 +40,12 @@ impl Forwards {
         Forwards { run: format!("{:016x}", h.finish()), list: vec![], files: vec![] }
     }
 
-    /// Forwards a local socket; returns its remote path.
     pub fn add(&mut self, local: &std::path::Path) -> String {
         let remote = format!("/tmp/claudette-{}-{}.sock", self.run, self.list.len());
         self.list.push(crate::ssh::SocketForward { remote: remote.clone(), local: local.to_string_lossy().into_owned() });
         remote
     }
 
-    /// Delivers a private file; its contents never appear on a command line.
     pub fn file(&mut self, name: &str, data: Vec<u8>) -> String {
         let remote = format!("/tmp/claudette-{}.{}", self.run, name);
         self.files.push(RunFile { name: name.to_owned(), remote: remote.clone(), data });
@@ -70,11 +56,9 @@ impl Forwards {
 pub struct SocketHub {
     dir: PathBuf,
     count: AtomicUsize,
-    /// Stops every listener and connection.
     stop: CancellationToken,
 }
 
-/// The run folder of this process, once a hub made it; the local Bash tool keeps its files there.
 static RUN_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 pub fn run_dir() -> Option<&'static PathBuf> {
@@ -89,7 +73,6 @@ impl SocketHub {
         Ok(SocketHub { dir, count: AtomicUsize::new(0), stop: CancellationToken::new() })
     }
 
-    /// Serves this session to the other sessions here, at `agent.sock` in the run folder.
     pub fn serve_agent(&self, agent: Arc<crate::peers::Agent>) -> anyhow::Result<PathBuf> {
         let path = self.dir.join(crate::peers::SOCKET);
         let listener = UnixListener::bind(&path)?;
@@ -119,9 +102,6 @@ impl SocketHub {
         });
     }
 
-    /// Serves an MCP endpoint with MCP's stdio framing: one JSON-RPC message per line, both ways.
-    /// `name` labels its traffic in the frame log. The notifier sends the endpoint's own
-    /// notifications to every connected client.
     pub fn serve_mcp(&self, name: &str, endpoint: Endpoint) -> anyhow::Result<(PathBuf, Notify)> {
         let (path, listener) = self.listen()?;
         let clients: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>> = Arc::default();
@@ -146,16 +126,10 @@ impl SocketHub {
         Ok((path, notify))
     }
 
-    /// Serves the project for the remote mount: the SFTP server and the callbacks of the hooks in
-    /// the project's and the user's settings, which the workspace's Bash tool gets too, and watches
-    /// the files FileChanged hooks name. Returns the SFTP socket's remote path, and the callbacks,
-    /// through which the user's settings go too.
     pub fn serve_workspace(&self, forwards: &mut Forwards, ws: &Arc<Workspace>, nc: &str) -> anyhow::Result<(String, Arc<Callbacks>)> {
         let callbacks = Arc::new(Callbacks::new(&ws.root, nc));
         callbacks.set_socket(forwards.add(&self.serve_callbacks(callbacks.clone())?));
         let sftp = forwards.add(&self.serve_sftp(&ws.root, callbacks.clone())?);
-        // What claude reads of the project at start: the root's names (`.git`, `.mcp.json`, …) and
-        // Claude Code's own folder.
         if let Ok(mut project) = sftp::Project::new(&ws.root, Some(callbacks.clone()), crate::settings::respects_gitignore(&ws.root)) {
             let plan = warm::Plan { list: &["/"], tree: &["/.claude"], files: vec!["/.mcp.json".into()] };
             forwards.file("project.warm", warm::snapshot(&mut project, &plan, None));
@@ -166,8 +140,6 @@ impl SocketHub {
         Ok((sftp, callbacks))
     }
 
-    /// Serves the user's skills, agents, commands and output styles over SFTP, read-only, for the
-    /// remote machine to mount; returns the socket's remote path, or None when there are none.
     pub fn serve_user_content(&self, forwards: &mut Forwards) -> anyhow::Result<Option<String>> {
         let dir = crate::settings::user_dir();
         let Some(mut content) = sftp::UserContent::new(&dir) else { return Ok(None) };
@@ -183,8 +155,6 @@ impl SocketHub {
         Ok(Some(forwards.add(&path)))
     }
 
-    /// Serves the session's plugins over SFTP, read-only, for the remote machine to mount; returns
-    /// the socket's remote path, or None when there are none.
     pub fn serve_plugins(&self, forwards: &mut Forwards, plugins: Vec<crate::plugins::Plugin>, callbacks: Arc<Callbacks>) -> anyhow::Result<Option<String>> {
         if plugins.is_empty() {
             return Ok(None);
@@ -201,8 +171,6 @@ impl SocketHub {
         Ok(Some(forwards.add(&path)))
     }
 
-    /// Serves this machine's plugin store for the remote machine's `claude plugin …` (see
-    /// [`crate::mount::store`]); returns the socket's remote path.
     pub fn serve_store(&self, forwards: &mut Forwards, stage: Arc<crate::mount::store::Stage>) -> anyhow::Result<String> {
         let (path, listener) = self.listen()?;
         self.spawn(async move {
@@ -213,10 +181,6 @@ impl SocketHub {
         Ok(forwards.add(&path))
     }
 
-    /// Serves this machine's user configuration for the remote claude's Claude Code folder (see
-    /// [`crate::userconfig`]): `settings.json` and `keybindings.json`, sent with the run's first
-    /// frames when this machine has them, and a socket the session's saves of them come back on, one
-    /// per connection: `<name> <seq>` on the first line, then the file.
     pub fn serve_user_config(&self, forwards: &mut Forwards, config: Arc<crate::userconfig::UserConfig>) -> anyhow::Result<crate::userconfig::Delivery> {
         let settings = config.settings().map(|bytes| {
             trace("user-settings", &String::from_utf8_lossy(&bytes));
@@ -247,15 +211,10 @@ impl SocketHub {
         Ok(crate::userconfig::Delivery { settings, keybindings, sink: forwards.add(&path), saves })
     }
 
-    /// Serves this project's sessions folder over SFTP for the remote machine to mount as its own;
-    /// returns the socket's remote path. `args`: the run's arguments, which name the transcript it
-    /// resumes, if any.
     pub fn serve_sessions(&self, forwards: &mut Forwards, cwd: &std::path::Path, args: &[String]) -> anyhow::Result<String> {
         let root = transcripts::projects_dir().join(transcripts::project_key(cwd));
         let paths = Arc::new(workdir::PathMap::new(cwd));
         let mut sessions = sftp::Sessions::new(&root, paths.clone())?;
-        // The folder's names (a new transcript is known not to be there yet), the auto memory, and a
-        // transcript being resumed, whole, which the remote end then keeps (see [`crate::helper::near`]).
         let plan = warm::Plan { list: &["/"], tree: &["/memory"], files: transcripts::resumed(args, &root) };
         forwards.file("sessions.warm", warm::snapshot(&mut sessions, &plan, Some(&workdir::PathMap::parts(cwd))));
         let (path, listener) = self.listen()?;
@@ -270,9 +229,6 @@ impl SocketHub {
         Ok(forwards.add(&path))
     }
 
-    /// Serves the project over SFTP, for the remote machine to mount; each connection gets its own
-    /// server. `settings` adapts the project's settings files to the remote claude. What git ignores
-    /// is left out, as Claude Code's file picker leaves it out, unless `respectGitignore` is off.
     pub fn serve_sftp(&self, root: &std::path::Path, settings: Arc<Callbacks>) -> anyhow::Result<PathBuf> {
         let (path, listener) = self.listen()?;
         let root = root.to_path_buf();
@@ -288,8 +244,6 @@ impl SocketHub {
         Ok(path)
     }
 
-    /// Serves the callbacks of the project's hooks and status line: the callback's index on the
-    /// first line, then the hook's JSON input; the answer goes back before the connection closes.
     pub fn serve_callbacks(&self, callbacks: Arc<Callbacks>) -> anyhow::Result<PathBuf> {
         let (path, listener) = self.listen()?;
         self.spawn(async move {
@@ -313,7 +267,6 @@ impl SocketHub {
                             continue;
                         };
                         let input = &buffer[newline + 1..];
-                        // The input is one JSON document; it may come without a newline or EOF.
                         if complete || serde_json::from_slice::<Value>(input).is_ok() {
                             let index = String::from_utf8_lossy(&buffer[..newline]).trim().parse::<usize>();
                             break (index, input.to_vec());
@@ -370,8 +323,6 @@ impl SocketHub {
         Ok(forwards.add(&path))
     }
 
-    /// Serves a Claude Code command hook: the hook's JSON input arrives on the connection, possibly
-    /// without a newline, and the answer goes back before the connection closes.
     pub fn serve_hook(&self, answer: HookAnswer) -> anyhow::Result<PathBuf> {
         let (path, listener) = self.listen()?;
         self.spawn(async move {
@@ -390,7 +341,6 @@ impl SocketHub {
                             }
                             Ok(n) => {
                                 buffer.extend_from_slice(&chunk[..n]);
-                                // Not all of it yet, unless it parses.
                                 match serde_json::from_slice::<Value>(&buffer) {
                                     Ok(Value::Object(input)) => break answer(&input),
                                     Ok(_) => break Value::Object(Object::new()),
@@ -470,7 +420,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Writes `input`, half-closes like `nc -U` at the end of its stdin when asked, and reads the reply.
     async fn exchange(path: &std::path::Path, input: &[u8], half_close: bool) -> String {
         let mut conn = UnixStream::connect(path).await.unwrap();
         conn.write_all(input).await.unwrap();

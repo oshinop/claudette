@@ -1,7 +1,3 @@
-//! claudette's own commands, beside claude's: `claudette +doctor`, `+update`, `+version`, `+help`. The
-//! prefix (`+` unless the `prefix` setting says otherwise) keeps them apart from claude's commands and
-//! prompts. On a terminal they end with a notice when a newer release is out; nothing else shows it.
-
 use std::path::Path;
 use std::process::Stdio;
 
@@ -15,7 +11,6 @@ use crate::mount::workdir;
 use crate::run::exit_code;
 use crate::update::version_tuple;
 
-/// The Claude Code version the test suite runs against.
 const TESTED_CLAUDE: &str = "2.1.319";
 
 const USAGE: &str = "claude, running on another machine, working on this one.
@@ -40,12 +35,10 @@ Settings, in ~/.config/claudette/config.toml or as CLAUDETTE_<KEY> variables, wh
 
 More: https://github.com/oshinop/claudette/blob/main/docs/usage.md";
 
-/// Where to look for usage, in errors.
 pub fn see_help(prefix: &str) -> String {
     format!("see `claudette {prefix}help`")
 }
 
-/// The help, with claudette's own commands under the prefix in use, aligned with the rest.
 fn usage(prefix: &str) -> String {
     let own = [
         ("doctor", "check ssh and the remote machine"),
@@ -58,13 +51,11 @@ fn usage(prefix: &str) -> String {
     USAGE.replace("{own}", &own)
 }
 
-/// `command`: what follows the prefix (`doctor` in `+doctor`); `args`, the arguments after it.
 pub async fn run(command: &str, args: &[String], prefix: &str, cwd: &Path) -> anyhow::Result<i32> {
     if command == "update" {
         anyhow::ensure!(args.len() <= 1, "`{prefix}update` takes at most a version; {}", see_help(prefix));
         return crate::update::update(args.first().map(String::as_str)).await;
     }
-    // Looked for while the command runs; only on a terminal, so scripts never wait on it.
     let notice = std::io::IsTerminal::is_terminal(&std::io::stderr()).then(|| tokio::spawn(crate::update::notice(prefix.to_owned())));
     let code = match command {
         "" | "help" => {
@@ -109,7 +100,6 @@ async fn doctor(config: &Config, cwd: &Path) -> anyhow::Result<i32> {
     {
         println!("warning: claudette is tested with Claude Code {TESTED_CLAUDE}; the remote has {version}");
     }
-    // The workspace mount needs sshfs and the relay needs nc; the sandbox uses bwrap or sandbox-exec.
     let probe = format!(
         "for c in sshfs {} bwrap sandbox-exec; do if command -v \"$c\" >/dev/null 2>&1; then echo \"$c yes\"; else echo \"$c no\"; fi; done",
         shell_quote(&config.remote_nc)
@@ -135,7 +125,6 @@ async fn doctor(config: &Config, cwd: &Path) -> anyhow::Result<i32> {
         println!("remote sandbox: MISSING (install bubblewrap; claude only runs confined to the workspace)");
         code = 1;
     }
-    // Sessions run under the helper; it is copied on first use, as here.
     match crate::tunnel::check_helper(config).await {
         Ok(version) => println!("remote helper: {version}"),
         Err(e) => {

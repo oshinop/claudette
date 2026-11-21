@@ -1,5 +1,3 @@
-//! Grep, with ripgrep's own libraries: no `rg` needed on this machine, and .gitignore is honored.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -106,9 +104,7 @@ impl Options {
     }
 }
 
-/// Collects one file's output the way ripgrep prints it.
 struct Collect<'a> {
-    /// The file name prefix; empty when searching a single file, as ripgrep omits it then.
     prefix: String,
     line_numbers: bool,
     lines: &'a mut Vec<String>,

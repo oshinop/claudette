@@ -20,8 +20,6 @@ describe("local tools", () => {
     const [first] = await modelRequests(id);
     expect(first!.tools).toContain("mcp__cc__Read");
     for (const builtin of ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "ListAgents", "SendMessage"]) expect(first!.tools).not.toContain(builtin);
-    // Built-ins outside the allowlist stay off: they act on the remote machine. Tool search defers some built-ins
-    // by name in the messages, so look at the whole request.
     const request = JSON.stringify(first);
     for (const off of ["CronCreate", "Monitor", "EnterWorktree"]) expect(request).not.toMatch(new RegExp(`\\b${off}\\b`));
     expect(request).toContain("WebFetch");
@@ -170,7 +168,6 @@ describe("permissions", () => {
   });
 });
 
-/** Tool search defers MCP tools behind ToolSearch; the scripted model calls them directly instead. */
 const noToolSearch = { ...process.env, ENABLE_TOOL_SEARCH: "false" };
 
 describe("MCP servers", () => {
@@ -334,7 +331,6 @@ describe("sessions", () => {
     const id = await scenario([{ tool: "Bash", input: { command: `bash -c 'exec -a ${marker} sleep 30' & wait; touch finished` } }, { text: "done" }]);
     const session = start(dir, { canUseTool: permissions().canUseTool });
     const running = () => Bun.spawnSync(["pgrep", "-f", marker]).exitCode === 0;
-    // The outer shell's command line holds "touch finished"; it must die with the group, not run on.
     const shellAlive = () => Bun.spawnSync(["pgrep", "-f", "touch finished"]).exitCode === 0;
     const done = session.turn(`[[scenario:${id}]] long`);
     expect(await until(running)).toBe(true);
@@ -381,7 +377,6 @@ describe("the remote machine's own configuration", () => {
 
 describe("this machine's user configuration", () => {
   const claudeDir = join(homedir(), ".claude");
-  /** Writes files under the local machine user's ~/.claude for one test, and takes them away after. */
   function withUserFiles(files: Record<string, string>): () => void {
     for (const [name, content] of Object.entries(files)) {
       mkdirSync(join(claudeDir, name, ".."), { recursive: true });
@@ -417,8 +412,6 @@ describe("this machine's user configuration", () => {
       expect(JSON.stringify(first)).toContain("local-user-skill");
       expect(JSON.stringify(first)).toContain("local-user-agent");
       expect(readFileSync(join(dir, "user-hook.txt"), "utf8")).toBe("local\n");
-      // The user's settings reach the remote claude as its Claude Code folder's settings.json, which
-      // the frame log records as given; the command line carries none of them.
       const given = readFileSync(log, "utf8").split("\n").find((l) => l.includes('"dir":"user-settings"'))!;
       expect(given).toContain("USER_SETTING_VAR");
       const spawn = readFileSync(log, "utf8").split("\n").find((l) => l.includes('"dir":"spawn"'))!;
@@ -427,7 +420,6 @@ describe("this machine's user configuration", () => {
         expect(spawn).not.toContain(secret);
       }
       expect(JSON.stringify(await modelRequests(id))).not.toContain("local-credential");
-      // Nothing is copied to the remote machine: its own folder never gets the local machine user's files.
       expect(onRemote("ls ~/.claude/skills 2>/dev/null; grep -rl local-credential ~/.claude ~/.claude.json 2>/dev/null")).toBe("");
       expect(onRemote("ls -d /tmp/claudette-*.user 2>/dev/null")).toBe("");
     } finally {
@@ -438,7 +430,6 @@ describe("this machine's user configuration", () => {
   test("a plugin installed on the local machine (on by default): its skill gets its options, its hook and MCP server run locally", async () => {
     const root = join(claudeDir, "plugins/cache/market/lint/1.0.0");
     const cleanup = withUserFiles({
-      // No enabledPlugins entry: an installed plugin is on unless its manifest says otherwise.
       "settings.json": JSON.stringify({ pluginConfigs: { "lint@market": { options: { level: "7" } } } }),
       "plugins/installed_plugins.json": JSON.stringify({ version: 2, plugins: { "lint@market": [{ scope: "user", installPath: root, version: "1.0.0" }] } }),
       "plugins/cache/market/lint/1.0.0/.claude-plugin/plugin.json": JSON.stringify({ name: "lint", version: "1.0.0", userConfig: { level: { type: "string", title: "Level", description: "How strict" } } }),
@@ -466,7 +457,6 @@ describe("this machine's user configuration", () => {
       expect(JSON.stringify(requests)).toContain("LEVEL=7");
       expect(resultText(result)).toBe(`stdio-server-on:local cwd:${dir}`);
       expect(readFileSync(join(dir, "plugin-hook.txt"), "utf8")).toBe(`local ${root} 7\n`);
-      // The remote machine installs nothing and keeps no mount.
       expect(onRemote("ls ~/.claude/plugins/cache 2>/dev/null; ls -d /tmp/claudette-*.plugins 2>/dev/null")).toBe("");
     } finally {
       cleanup();
@@ -525,11 +515,9 @@ describe("an existing Claude Code setup on this machine carries over", () => {
     expect(toolResult(requests[1])).not.toContain("SECRET=local");
     expect(toolResult(requests[2])).toContain("notes.txt");
     expect(toolResult(requests[2])).not.toContain(".env");
-    // Only the ask rule's path reached the host; the bare Write allow covered the other file.
     expect(perms.asked.map((a) => a.input.file_path)).toEqual([join(dir, "src/new.ts")]);
     expect(readFileSync(join(dir, "src/new.ts"), "utf8")).toBe("asked\n");
     expect(readFileSync(join(dir, "free.txt"), "utf8")).toBe("free\n");
-    // A Read deny also blocks writing the file, whatever allows Write.
     expect(readFileSync(join(dir, ".env"), "utf8")).toBe("SECRET=local\n");
   });
 
@@ -549,7 +537,6 @@ describe("an existing Claude Code setup on this machine carries over", () => {
 
     const requests = await modelRequests(id);
     expect(toolResult(requests[1])).toContain("from-settings");
-    // acceptEdits covers the added directory as it covers the project.
     expect(perms.asked.map((a) => a.toolName)).toEqual(["Bash"]);
     expect(readFileSync(join(extra, "x.txt"), "utf8")).toBe("x");
   });

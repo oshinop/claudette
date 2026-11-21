@@ -1,6 +1,3 @@
-//! What the paths that run claude remotely share: Claude Code's own commands passed through as is,
-//! and what a session takes from this machine besides its tools.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,11 +12,9 @@ use crate::tools::Workspace;
 use crate::userconfig::{Delivery, UserConfig};
 
 pub fn is_tty() -> bool {
-    // SAFETY: isatty only inspects the descriptor.
     unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 }
 }
 
-/// An exit status as a shell reports it: the code, or 128 plus the signal.
 pub fn exit_code(status: std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
@@ -53,8 +48,6 @@ async fn run_remote(config: &Config, mut forwards: Forwards, command: String) ->
     code
 }
 
-/// The local folders the plugin store records as marketplaces (`"source": "directory"` or `"file"`),
-/// which `claude plugin marketplace update` reads again.
 fn recorded_marketplace_paths() -> Vec<PathBuf> {
     let user = settings::user_dir();
     let read = |p: PathBuf| std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
@@ -73,9 +66,6 @@ fn recorded_marketplace_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// `claude plugin …`: Claude Code's own plugin commands, run by the remote machine's Claude Code on
-/// this machine's plugin store and settings, mounted (see [`crate::mount::store`]). A local folder
-/// the command names (`./my-marketplace`) is mounted too.
 pub async fn plugin_command(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Result<i32> {
     let hub = SocketHub::new()?;
     let mut forwards = Forwards::new();
@@ -107,27 +97,16 @@ pub async fn plugin_command(config: &Config, argv: &[String], cwd: &Path) -> any
     result
 }
 
-/// What a session takes from this machine besides its tools: the project, mounted; the sessions
-/// folder, mounted as the remote claude's; for the remote claude's Claude Code folder, the user's
-/// settings and keybindings, adapted, with the user's skills, agents, commands and output styles
-/// mounted read-only; and the enabled plugins, mounted read-only (see [`crate::plugins`]).
 pub struct Delivered {
-    /// The workspace's SFTP socket on the remote machine.
     pub sftp: String,
-    /// The user content's SFTP socket on the remote machine, if there is any to send.
     pub user: Option<String>,
-    /// The sessions folder's SFTP socket on the remote machine.
     pub sessions: String,
-    /// The plugins' SFTP socket on the remote machine, if the session has any.
     pub plugins: Option<String>,
-    /// The user's configuration files, and where saves of them come back.
     pub config: Delivery,
     pub desktop: String,
-    /// The remote claude's `--settings`: the caller's, when it gave any, without its plugin choices.
     pub settings: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// Serves what the session takes from this machine, and adds the plugins' MCP servers to `args`.
 pub fn deliver(hub: &SocketHub, forwards: &mut Forwards, args: &mut ParsedArgs, ws: &Arc<Workspace>, config: &Config) -> anyhow::Result<Delivered> {
     let sources = settings::Sources::of(args);
     let cwd = ws.root.as_path();
@@ -136,8 +115,6 @@ pub fn deliver(hub: &SocketHub, forwards: &mut Forwards, args: &mut ParsedArgs, 
     let sessions = hub.serve_sessions(forwards, cwd, &args.rest)?;
     let enabled = plugins::enabled(cwd, args);
     plugins::add_servers(args, &enabled, cwd);
-    // The remote claude knows the plugins by the ids it gives `--plugin-dir` ones, and gets their
-    // non-sensitive options under those; the caller's own plugin choices stay here.
     let options = plugins::remote_options(&enabled);
     let mut settings = args.settings.clone();
     if let Some(s) = settings.as_mut() {

@@ -1,14 +1,3 @@
-//! Sessions on this machine reaching each other: what ListAgents and SendMessage do among a local
-//! claude's sessions. The built-ins are off: on the remote machine they would reach every session
-//! there, other machines' included.
-//!
-//! There is no registry. Each run's folder in this user's runtime folder holds `agent.sock`; a
-//! listing asks every one that answers, so it is always current, and a folder whose process is gone
-//! is removed. A message goes to the session's own claudette, which puts it into its claude's
-//! inbox on the remote machine: a private folder only that run knows (`CLAUDE_CODE_TMPDIR`), so the
-//! remote machine's own session list plays no part. claude takes it as a message from another
-//! session, never as the user's prompt.
-
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,13 +9,9 @@ use tokio::net::UnixStream;
 
 use crate::json::{Object, str_field};
 
-/// The session's socket in its run folder.
 pub const SOCKET: &str = "agent.sock";
-/// Run folders: `claudette-<pid>-XXXXXX`.
 const RUN_PREFIX: &str = "claudette-";
-/// How long a listing waits for one session to answer.
 const ASK_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long a message may take to reach the remote inbox.
 const DELIVER_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,18 +31,14 @@ impl Status {
     }
 }
 
-/// Puts one inbox line (a JSON object) into this session's claude; an error is shown to the sender.
 pub type Deliver = Arc<dyn Fn(Value) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
 
-/// This session, as the other sessions here see it.
 pub struct Agent {
-    /// Short and unique: tells sessions with the same name apart.
     pub id: String,
     pub name: String,
     pub project: PathBuf,
     started: u64,
     status: Mutex<Status>,
-    /// Sockets of sessions waiting for this one to go idle or end.
     watchers: Mutex<Vec<PathBuf>>,
     socket: OnceLock<PathBuf>,
     deliver: Deliver,
@@ -67,7 +48,6 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// A path under the home folder as `~/…`.
 pub fn shown(path: &Path) -> String {
     match path.strip_prefix(crate::config::home()) {
         Ok(rest) if !rest.as_os_str().is_empty() => format!("~/{}", rest.display()),
@@ -76,7 +56,6 @@ pub fn shown(path: &Path) -> String {
 }
 
 impl Agent {
-    /// `run` is the run's unique id; `name` defaults to the project folder's name.
     pub fn new(run: &str, name: Option<String>, project: &Path, deliver: Deliver) -> Arc<Agent> {
         let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
             project.file_name().map(|n| n.to_string_lossy().into_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| "session".into())
@@ -93,7 +72,6 @@ impl Agent {
         })
     }
 
-    /// `name [id]`: how sessions address each other.
     pub fn label(&self) -> String {
         format!("{} [{}]", self.name, self.id)
     }
@@ -110,7 +88,6 @@ impl Agent {
         *self.status.lock().unwrap()
     }
 
-    /// A new status; going idle tells the sessions waiting for it.
     pub fn set_status(self: &Arc<Self>, status: Status) {
         let was = std::mem::replace(&mut *self.status.lock().unwrap(), status);
         if status == Status::Idle && was != Status::Idle {
@@ -120,7 +97,6 @@ impl Agent {
         }
     }
 
-    /// The session is ending: the sessions waiting for it hear so.
     pub async fn end(&self) {
         let watchers = std::mem::take(&mut *self.watchers.lock().unwrap());
         self.tell(watchers, "has ended").await;
@@ -137,7 +113,6 @@ impl Agent {
         json!({ "id": self.id, "name": self.name, "project": self.project, "status": self.status().as_str(), "started": self.started })
     }
 
-    /// A message from another session, into this session's claude.
     async fn receive(&self, from: &str, project: &str, text: &str) -> Result<(), String> {
         let content = format!("{text}\n\n(From session {from}, working in {project}. To reply, use SendMessage with to: \"{from}\".)");
         let line = json!({ "type": "user", "message": { "role": "user", "content": content }, "priority": "next", "from": from });
@@ -173,7 +148,6 @@ impl Agent {
 
 static THIS: OnceLock<Arc<Agent>> = OnceLock::new();
 
-/// This process's session; one per process.
 pub fn register(agent: Arc<Agent>) {
     let _ = THIS.set(agent);
 }
@@ -188,7 +162,6 @@ pub fn set_status(status: Status) {
     }
 }
 
-/// One request on a session's socket: a JSON line, answered by one.
 pub async fn serve_connection(agent: Arc<Agent>, conn: UnixStream) {
     let (read, mut write) = conn.into_split();
     let mut line = String::new();
@@ -214,7 +187,6 @@ async fn ask(socket: &Path, request: &Value) -> Result<Value, String> {
     tokio::time::timeout(limit, exchange).await.unwrap_or_else(|_| Err("no answer".into()))
 }
 
-/// Another session here, as it described itself.
 #[derive(Debug, Clone)]
 pub struct Peer {
     pub id: String,
@@ -235,8 +207,6 @@ fn process_alive(pid: i32) -> bool {
     !matches!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None), Err(nix::errno::Errno::ESRCH))
 }
 
-/// The other sessions with a run folder in `root`, except the one at `own`. A folder this user owns
-/// whose process is gone is removed; anything else that does not answer is left alone.
 pub async fn list(root: &Path, own: Option<&Path>) -> Vec<Peer> {
     use std::os::unix::fs::MetadataExt;
     let uid = nix::unistd::getuid().as_raw();
@@ -277,7 +247,6 @@ pub async fn list(root: &Path, own: Option<&Path>) -> Vec<Peer> {
     peers
 }
 
-/// The peer `to` names: `name [id]`, the id, or a name only one session has.
 pub fn resolve<'a>(peers: &'a [Peer], to: &str) -> Result<&'a Peer, String> {
     let to = to.trim().trim_start_matches('@');
     if let Some(peer) = peers.iter().find(|p| p.label() == to || p.id == to) {
@@ -299,8 +268,6 @@ fn listing_hint(peers: &[Peer]) -> String {
     }
 }
 
-/// Sends `text` from `from` to the session `to` names; with `notify`, also asks it for one notice
-/// when it is next idle or ends. Returns the target's label and status.
 pub async fn send(root: &Path, from: &Agent, to: &str, text: Option<&str>, notify: bool) -> Result<(String, String), String> {
     let peers = list(root, from.socket().map(PathBuf::as_path)).await;
     if to.trim().trim_start_matches('@') == from.label() || to.trim() == from.id {
@@ -323,9 +290,6 @@ pub async fn send(root: &Path, from: &Agent, to: &str, text: Option<&str>, notif
     }
 }
 
-/// Delivery into the run's claude: the line goes to the run's holder on the remote machine through
-/// the session's connection, queued while that connection is away, and the holder puts it into
-/// claude's inbox there (see [`crate::helper`]).
 pub fn queued(to_holder: tokio::sync::mpsc::UnboundedSender<Value>) -> Deliver {
     Arc::new(move |line: Value| {
         let sent = to_holder.send(line).map_err(|_| "that session has ended".to_owned());
@@ -338,14 +302,12 @@ mod tests {
     use super::*;
 
     fn root() -> PathBuf {
-        // Short: a socket path has room for about 100 bytes.
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let dir = PathBuf::from(format!("/tmp/cta-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    /// A session serving its socket from `root/claudette-<pid>-<tag>`, recording what it is given.
     fn session(root: &Path, tag: &str, name: &str, project: &str) -> (Arc<Agent>, Arc<Mutex<Vec<Value>>>) {
         let got: Arc<Mutex<Vec<Value>>> = Arc::default();
         let sink = got.clone();
@@ -432,7 +394,6 @@ mod tests {
     #[tokio::test]
     async fn a_folder_whose_process_is_gone_is_removed_and_a_live_silent_one_is_kept() {
         let root = root();
-        // A pid that no longer runs: a child that has exited and been reaped.
         let dead = std::process::Command::new("true").spawn().unwrap();
         let pid = dead.id();
         let _ = dead.wait_with_output();

@@ -4,10 +4,6 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 
 type Session = { mcp: McpServer; transport: WebStandardStreamableHTTPServerTransport };
 
-/**
- * A token-protected MCP server on the local machine's loopback, like the one an SDK host (T3 Code) runs for
- * its own tools. The remote claude cannot reach 127.0.0.1 here, so only a local bridge can call it.
- */
 export function startHttpMcp(token: string) {
   const authorizations: (string | null)[] = [];
   const sessions = new Map<string, Session>();

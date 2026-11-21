@@ -1,17 +1,3 @@
-//! The project, served over SFTP for the remote machine to mount (`sshfs -o passive`).
-//!
-//! The remote claude reads the project's own configuration through this mount: `.claude/`
-//! settings, skills, commands and agents, `.mcp.json`, and the files `@` mentions and
-//! autocomplete show. Its file and shell work still goes through the local tools; so the mount
-//! is read-only except for Claude Code's own files (`.claude/`, `.mcp.json`, `CLAUDE*.md`), which
-//! is how a "don't ask again" lands in this machine's `.claude/settings.local.json`. The settings
-//! files themselves pass through the view in `settings.rs`.
-//!
-//! Every path is inside the project: `/` is the project root, `..` stops there, and a symlink
-//! whose target lies outside the project cannot be read through. `.git` and `node_modules` are
-//! not served: they are large, and claude reads git state through the local tools. Nor is what git
-//! ignores, apart from Claude Code's own files (see [`super::visible`]).
-
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::{File as FsFile, Metadata, OpenOptions};
@@ -26,11 +12,8 @@ use super::visible::Visibility;
 use crate::plugins::{self, Plugin};
 use crate::settings::{Callbacks, SETTINGS_FILES};
 
-/// Names that are never served, at any depth.
 const HIDDEN: [&str; 2] = [".git", "node_modules"];
 
-/// Claude Code's own files, the only ones the remote side may change, with the temporary files it
-/// writes them through (`.mcp.json.tmp.123`, then a rename).
 fn is_writable(relative: &Path) -> bool {
     let all: Vec<&str> = relative
         .components()
@@ -56,18 +39,15 @@ pub(crate) fn ok(id: u32) -> Status {
 }
 
 thread_local! {
-    /// Set while a warm start asks the servers directly: those are not the remote claude's requests.
     static QUIET: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Records a request in the frame log: each is a round trip for the remote claude.
 pub(crate) fn note(op: &str, path: &str) {
     if crate::log::enabled() && !QUIET.get() {
         crate::log::trace("sftp", &format!("{op} {path}"));
     }
 }
 
-/// Runs `f` with the frame log left out of the servers' requests (see [`super::warm`]).
 pub(crate) fn quietly<T>(f: impl FnOnce() -> T) -> T {
     QUIET.set(true);
     let out = f();
@@ -75,18 +55,13 @@ pub(crate) fn quietly<T>(f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// Entries per READDIR reply: no more than OpenSSH's sftp-server sends, and well under the 128 KiB
-/// sshfs accepts in one reply (it drops the connection, and the mount with it, over that), so a big
-/// folder goes out over several replies.
 const READDIR_BATCH: usize = 100;
 const READDIR_BYTES: usize = 64 * 1024;
 
-/// The next READDIR reply's entries from a listing, or `None` at its end.
 pub(crate) fn next_batch(listing: &mut Vec<File>) -> Option<Vec<File>> {
     if listing.is_empty() {
         return None;
     }
-    // Each entry: two length-prefixed strings, then its attributes (generously sized).
     let mut bytes = 0;
     let count = listing
         .iter()
@@ -103,43 +78,33 @@ pub(crate) fn next_batch(listing: &mut Vec<File>) -> Option<Vec<File>> {
 
 enum Open {
     File(FsFile),
-    /// The entries of a directory listing not handed out yet.
     Dir(Vec<File>),
-    /// A settings file, served through the view; what is written goes back to `local` on close.
     Settings { local: PathBuf, data: Vec<u8>, written: bool },
 }
 
 pub struct Project {
-    /// The project root, canonical.
     root: PathBuf,
-    /// The view of the project's settings files, when the session adapts them.
     settings: Option<Arc<Callbacks>>,
-    /// What git ignores, which is not served.
     visible: Visibility,
     handles: HashMap<String, Open>,
     next: u64,
 }
 
 impl Project {
-    /// `respect_gitignore`: Claude Code's `respectGitignore`; when false, ignored files are served too.
     pub fn new(root: &Path, settings: Option<Arc<Callbacks>>, respect_gitignore: bool) -> std::io::Result<Project> {
         let root = root.canonicalize()?;
         let visible = Visibility::new(&root, respect_gitignore);
         Ok(Project { root, settings, visible, handles: HashMap::new(), next: 0 })
     }
 
-    /// Whether a path below the root is served: Claude Code's own files always are, other files
-    /// unless git ignores them.
     fn shows(&self, relative: &Path, is_dir: bool) -> bool {
         is_writable(relative) || self.visible.shows(relative, is_dir)
     }
 
-    /// One of the project's settings files, served through the view.
     fn is_settings(&self, local: &Path) -> bool {
         self.settings.is_some() && local.strip_prefix(&self.root).is_ok_and(|r| SETTINGS_FILES.iter().any(|f| r == Path::new(f)))
     }
 
-    /// A client path as a path below the root; `..` stops at the root. Hidden names do not exist.
     fn relative(&self, path: &str) -> Result<PathBuf, StatusCode> {
         let mut out = PathBuf::new();
         for component in Path::new(path).components() {
@@ -159,8 +124,6 @@ impl Project {
         Ok(out)
     }
 
-    /// The local path for a client path, following symlinks: it must stay inside the project, and
-    /// neither the path nor where it leads may be ignored.
     fn resolve(&self, path: &str) -> Result<PathBuf, StatusCode> {
         let relative = self.relative(path)?;
         let local = self.root.join(&relative);
@@ -176,8 +139,6 @@ impl Project {
         Ok(real)
     }
 
-    /// The local path for a client path, not following a final symlink (lstat, remove, rename):
-    /// its parent must resolve inside the project, and the entry must not be ignored.
     fn resolve_entry(&self, path: &str) -> Result<(PathBuf, PathBuf), StatusCode> {
         let relative = self.relative(path)?;
         let Some(name) = relative.file_name().map(ToOwned::to_owned) else { return Ok((self.root.clone(), relative)) };
@@ -198,7 +159,6 @@ impl Project {
 
     fn attrs(&self, local: &Path, meta: &Metadata) -> FileAttributes {
         let mut attrs = FileAttributes::from(meta);
-        // Ownership is the remote user's (sshfs -o uid,gid); write bits only where writes are allowed.
         attrs.uid = None;
         attrs.gid = None;
         attrs.user = None;
@@ -389,7 +349,6 @@ impl russh_sftp::server::Handler for Project {
 
     async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
         let local = self.writable(&path)?;
-        // A settings file's size is the view's; only truncating it means the same on the real file.
         if self.is_settings(&local) && attrs.size.is_some_and(|s| s != 0) {
             return Ok(ok(id));
         }
@@ -406,7 +365,6 @@ impl russh_sftp::server::Handler for Project {
             return Ok(ok(id));
         }
         let file = self.file(&handle)?;
-        // A read-only handle cannot change the file: set_len fails on it, and times are ignored.
         let file = file.try_clone().map_err(|e| io_status(&e))?;
         Self::set_attrs(Path::new(""), Some(&file), &attrs)?;
         Ok(ok(id))
@@ -459,7 +417,6 @@ impl russh_sftp::server::Handler for Project {
 
     async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
         let (from, to) = (self.writable(&oldpath)?, self.writable(&newpath)?);
-        // A settings file written by replacement (write a temporary file, rename it over) is turned back.
         if let Some(settings) = self.settings.as_ref().filter(|_| self.is_settings(&to)) {
             let written = std::fs::read(&from).map_err(|e| io_status(&e))?;
             std::fs::write(&to, settings.restore_file(&written, &to)).map_err(|e| io_status(&e))?;
@@ -475,29 +432,20 @@ impl russh_sftp::server::Handler for Project {
     }
 }
 
-/// The folders of this machine's `~/.claude` that hold what the user wrote: never its settings
-/// file (that goes through `--settings`), credentials, sessions, history or caches.
 pub const USER_CONTENT: [&str; 4] = ["skills", "agents", "commands", "output-styles"];
 
-/// This machine's user-level skills, agents, commands and output styles, served read-only as
-/// `/.claude/<folder>/…` for the remote claude to load as an added directory. Nothing else of the
-/// user's Claude Code folder is reachable: a path outside those folders does not exist, and a
-/// symlink may not lead out of the folder it is in.
 pub struct UserContent {
-    /// `~/.claude`, or `CLAUDE_CONFIG_DIR`.
     dir: PathBuf,
     handles: HashMap<String, Open>,
     next: u64,
 }
 
 enum Entry {
-    /// `/` or `/.claude`: listed, but not a real folder.
     Virtual(Vec<String>),
     Real(PathBuf),
 }
 
 impl UserContent {
-    /// None when the user has none of those folders.
     pub fn new(dir: &Path) -> Option<UserContent> {
         let content = UserContent { dir: dir.to_path_buf(), handles: HashMap::new(), next: 0 };
         (!content.present().is_empty()).then_some(content)
@@ -523,12 +471,10 @@ impl UserContent {
             [claude] if claude == ".claude" => Ok(Entry::Virtual(self.present())),
             [claude, folder, rest @ ..] if claude == ".claude" && USER_CONTENT.contains(&folder.as_str()) => {
                 let top = self.dir.join(folder).canonicalize().map_err(|e| io_status(&e))?;
-                // The folder itself shows as what it leads to (a dotfiles symlink becomes the folder).
                 if rest.is_empty() {
                     return Ok(Entry::Real(top));
                 }
                 let local = rest.iter().fold(top.clone(), |p, part| p.join(part));
-                // An entry inside may be a symlink (lstat); whatever it leads to must stay in the folder.
                 let check = if follow { local.canonicalize() } else { local.parent().map_or(Ok(top.clone()), Path::canonicalize) };
                 let check = check.map_err(|e| io_status(&e))?;
                 if !check.starts_with(&top) {
@@ -546,7 +492,6 @@ impl UserContent {
 
     fn stat_entry(&self, path: &str, follow: bool) -> Result<FileAttributes, StatusCode> {
         match self.entry(path, follow)? {
-            // A virtual folder looks like the user's Claude Code folder, read-only.
             Entry::Virtual(_) => std::fs::metadata(&self.dir).map(|m| self.attrs(&m)).map_err(|e| io_status(&e)),
             Entry::Real(local) => {
                 let meta = if follow { std::fs::metadata(&local) } else { std::fs::symlink_metadata(&local) };
@@ -664,7 +609,6 @@ impl russh_sftp::server::Handler for UserContent {
     }
 }
 
-/// A file's attributes as a read-only mount shows them: the remote user's, with no write bits.
 fn read_only(meta: &Metadata) -> FileAttributes {
     let mut attrs = FileAttributes::from(meta);
     attrs.uid = None;
@@ -675,11 +619,6 @@ fn read_only(meta: &Metadata) -> FileAttributes {
     attrs
 }
 
-/// The session's plugins (see [`crate::plugins`]), served read-only as `/<plugin>/…` for the remote
-/// claude to load with `--plugin-dir`. For a plugin whose hooks and MCP servers run here, its hooks
-/// files and manifest go through the view (hooks call back, declared servers are gone) and its
-/// `.mcp.json` does not exist. Nothing outside the plugins' folders is reachable, and no symlink
-/// leads out of the folder it is in.
 pub struct Plugins {
     plugins: Arc<Vec<Plugin>>,
     callbacks: Arc<Callbacks>,
@@ -688,7 +627,6 @@ pub struct Plugins {
 }
 
 enum PluginEntry {
-    /// `/`: lists the plugins.
     Root,
     Real { plugin: usize, relative: PathBuf, local: PathBuf },
 }
@@ -698,7 +636,6 @@ impl Plugins {
         Plugins { plugins, callbacks, handles: HashMap::new(), next: 0 }
     }
 
-    /// Whether a path inside a plugin is the view's and not the file's.
     fn viewed(&self, plugin: &Plugin, relative: &Path) -> bool {
         relative == Path::new(plugins::MANIFEST) || plugin.hook_files().iter().any(|f| f == relative)
     }
@@ -731,7 +668,6 @@ impl Plugins {
         Ok(PluginEntry::Real { plugin: index, relative, local })
     }
 
-    /// A viewed file's contents.
     fn view(&self, plugin: &Plugin, relative: &Path, local: &Path) -> Result<Vec<u8>, StatusCode> {
         if relative == Path::new(plugins::MANIFEST) {
             return Ok(plugin.manifest_view(&self.callbacks));
@@ -742,7 +678,6 @@ impl Plugins {
 
     fn stat_entry(&self, path: &str, follow: bool) -> Result<FileAttributes, StatusCode> {
         match self.entry(path, follow)? {
-            // The listing looks like the first plugin's folder.
             PluginEntry::Root => self.plugins.first().ok_or(StatusCode::NoSuchFile).and_then(|p| std::fs::metadata(&p.root).map(|m| read_only(&m)).map_err(|e| io_status(&e))),
             PluginEntry::Real { plugin, relative, local } => {
                 let meta = if follow { std::fs::metadata(&local) } else { std::fs::symlink_metadata(&local) };
@@ -876,7 +811,6 @@ impl russh_sftp::server::Handler for Plugins {
                     .filter(|e| !(hides_mcp && e.file_name() == plugins::MCP_FILE))
                     .filter_map(|e| {
                         let mut attrs = read_only(&std::fs::symlink_metadata(e.path()).ok()?);
-                        // A viewed file lists at the view's size, as lstat gives it.
                         let inside = relative.join(e.file_name());
                         if attrs.is_regular() && self.viewed(plugin, &inside) {
                             attrs.size = Some(self.view(plugin, &inside, &e.path()).ok()?.len() as u64);
@@ -901,16 +835,7 @@ impl russh_sftp::server::Handler for Plugins {
     }
 }
 
-/// This project's sessions folder on this machine (`~/.claude/projects/<project>`), served for the
-/// remote machine to mount as its own sessions folder for the workspace: the remote claude lists,
-/// resumes and writes its transcripts here, so sessions live on this machine only, beside the ones
-/// a local claude wrote before.
-///
-/// Everything inside the folder may change; nothing outside it exists, and no symlink leads out.
-/// What the remote claude writes has its paths turned into this machine's (the workspace folder
-/// becomes the project), one complete line at a time, so the files read as a local claude's.
 pub struct Sessions {
-    /// The folder, canonical.
     root: PathBuf,
     paths: Arc<crate::mount::workdir::PathMap>,
     handles: HashMap<String, SessionOpen>,
@@ -922,12 +847,8 @@ enum SessionOpen {
     File { file: FsFile, lines: LineWriter },
 }
 
-/// The SFTP extension that opens a sessions-folder file under a handle the client chose, so the
-/// client can send its writes right behind the open without waiting for a handle (see
-/// [`crate::helper::near`]). Answered with a status; client handles never start with a digit.
 pub const OPEN_AS: &str = "open-as@claudette";
 
-/// The request of [`OPEN_AS`]: an OPEN, and the handle it goes under.
 #[derive(Serialize, Deserialize)]
 pub struct OpenAs {
     pub handle: String,
@@ -936,22 +857,13 @@ pub struct OpenAs {
     pub attrs: FileAttributes,
 }
 
-/// How a sessions-folder file opened by the remote side takes its writes: appended or sequential
-/// bytes (as Claude Code writes transcripts) are written one complete line at a time with this
-/// machine's paths; anything else goes where it is written, as it is. The sessions server keeps one
-/// per handle, and the remote near cache keeps one per handle on its copy of a transcript, so the two
-/// stay byte for byte the same.
 pub struct LineWriter {
-    /// Opened to append: every write goes at the end, whatever its offset.
     append: bool,
-    /// Where the remote side's next sequential write starts, in its own byte count.
     next: u64,
-    /// Bytes written after the last complete line, mapped once the line ends.
     pending: Vec<u8>,
 }
 
 impl LineWriter {
-    /// For a file opened with `pflags` that is `size` bytes long once opened.
     pub fn new(pflags: OpenFlags, size: u64) -> LineWriter {
         LineWriter { append: pflags.contains(OpenFlags::APPEND), next: size, pending: vec![] }
     }
@@ -970,13 +882,11 @@ impl LineWriter {
         }
     }
 
-    /// The file was cut to `size`: what was pending is dropped.
     pub fn truncate(&mut self, size: u64) {
         self.pending.clear();
         self.next = size;
     }
 
-    /// Writes the complete lines pending (all of it with `all`, at the end), with this machine's paths.
     pub fn flush<F: Write + Seek>(&mut self, paths: &crate::mount::workdir::PathMap, file: &mut F, all: bool) -> std::io::Result<()> {
         let end = if all { self.pending.len() } else { self.pending.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1) };
         if end == 0 {
@@ -993,7 +903,6 @@ impl LineWriter {
 }
 
 impl Drop for Sessions {
-    /// A connection that ends mid-line still leaves what was written.
     fn drop(&mut self) {
         for open in self.handles.values_mut() {
             if let SessionOpen::File { file, lines } = open {
@@ -1023,7 +932,6 @@ impl Sessions {
         out
     }
 
-    /// The local path of an entry (not following a final symlink); its folder must be inside.
     fn entry(&self, path: &str) -> Result<PathBuf, StatusCode> {
         let relative = Self::relative(path);
         let Some(name) = relative.file_name() else { return Ok(self.root.clone()) };
@@ -1034,7 +942,6 @@ impl Sessions {
         Ok(parent.join(name))
     }
 
-    /// The local path of a file to open or stat, following symlinks, which must stay inside.
     fn resolve(&self, path: &str) -> Result<PathBuf, StatusCode> {
         let local = self.entry(path)?;
         match local.canonicalize() {
@@ -1282,7 +1189,6 @@ mod tests {
 
     #[test]
     fn a_reply_of_long_names_stays_under_what_sshfs_accepts() {
-        // macOS allows 255 UTF-16 units in a name: up to 765 bytes of UTF-8.
         let name = "é".repeat(380);
         let mut listing: Vec<File> = (0..200).map(|i| File::new(format!("{name}{i}"), FileAttributes::default())).collect();
         let mut total = 0;
@@ -1310,7 +1216,6 @@ mod tests {
         assert_eq!(names, [".claude", ".gitignore", "CLAUDE.local.md", "escape", "out", "src"]);
         assert_eq!(p.stat(3, "/target".into()).await.err(), Some(StatusCode::NoSuchFile));
         assert_eq!(p.open(4, "/target/debug/app".into(), READ, FileAttributes::empty()).await.err(), Some(StatusCode::NoSuchFile));
-        // A link into an ignored folder leads nowhere.
         assert_eq!(p.stat(5, "/out".into()).await.err(), Some(StatusCode::NoSuchFile));
         let h = p.open(6, "/CLAUDE.local.md".into(), READ, FileAttributes::empty()).await.unwrap().handle;
         assert_eq!(p.read(7, h, 0, 100).await.unwrap().data, b"notes");
@@ -1356,7 +1261,6 @@ mod tests {
         assert_eq!(names(u.readdir(2, root).await.unwrap().files), [".claude"]);
         let claude = u.opendir(3, "/.claude".into()).await.unwrap().handle;
         assert_eq!(names(u.readdir(4, claude).await.unwrap().files), ["skills", "agents"]);
-        // A mount looks entries up one by one (lstat), not only through listings.
         for path in ["/.claude", "/.claude/skills", "/.claude/skills/mine", "/.claude/skills/mine/SKILL.md"] {
             assert!(u.lstat(9, path.into()).await.is_ok(), "{path}");
         }
@@ -1378,7 +1282,6 @@ mod tests {
         let mut s = Sessions::new(&base.join("key"), Arc::new(crate::mount::workdir::PathMap::new(cwd))).unwrap();
         let append = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::APPEND;
         let h = s.open(1, "/sess.jsonl".into(), append, FileAttributes::empty()).await.unwrap().handle;
-        // A line split across writes is mapped once it is whole; offsets of an append do not matter.
         let line = format!("{{\"cwd\":\"{remote}\",\"file\":\"{remote}/src/a.rs\"}}\n");
         let (first, second) = line.split_at(20);
         s.write(2, h.clone(), 0, first.as_bytes().to_vec()).await.unwrap();

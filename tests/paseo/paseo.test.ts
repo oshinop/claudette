@@ -1,7 +1,3 @@
-/**
- * The real Paseo daemon, unmodified, with a Claude provider whose `command` is claudette.
- * Runs in the `paseo` container (scripts/test.sh).
- */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -10,7 +6,6 @@ import { modelRequests, onRemote, project, remoteDir, scenario } from "../e2e/ha
 
 const HOME = mkdtempSync(join(homedir(), "paseo-"));
 
-/** The daemon inherits this environment, which has no CLAUDETTE_HOST: the provider's `env` must supply it. */
 const { CLAUDETTE_HOST: _host, ...daemonEnv } = process.env;
 
 function paseo(...args: string[]) {
@@ -20,7 +15,6 @@ function paseo(...args: string[]) {
 
 beforeAll(() => {
   mkdirSync(HOME, { recursive: true });
-  // The provider entry from the README.
   const provider = { extends: "claude", label: "Claude on Mac remote", command: ["/usr/local/bin/claudette"], env: { CLAUDETTE_HOST: "remote" } };
   writeFileSync(join(HOME, "config.json"), JSON.stringify({ agents: { providers: { "claude-remote": provider } } }));
   const started = paseo("start");
@@ -35,7 +29,6 @@ describe("Paseo with claudette as the Claude command", () => {
   const dir = project({ "notes.txt": "paseo-local-file\n" });
   let agentId = "";
 
-  // The second test continues the agent this one starts.
   test("an agent's tools run on the local machine, and Paseo shows the reply", async () => {
     const status = paseo("status", "--json");
     expect(JSON.parse(status.out).providers).toContainEqual({ provider: "claude-remote", available: true, error: null });

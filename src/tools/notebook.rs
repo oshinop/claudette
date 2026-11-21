@@ -53,7 +53,6 @@ fn cell_id(cell: &Value, index: usize) -> String {
     cell.get("id").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| format!("cell-{index}"))
 }
 
-/// The cells of a notebook as text, with the ids NotebookEdit takes.
 pub fn render(text: &str) -> Result<String, String> {
     let mut nb = parse(text)?;
     Ok(cells(&mut nb)
@@ -69,7 +68,6 @@ pub fn render(text: &str) -> Result<String, String> {
         .join("\n"))
 }
 
-/// Source the way Jupyter stores it: lines that keep their newline.
 fn to_source(text: &str) -> Value {
     Value::Array(text.split_inclusive('\n').map(|l| Value::String(l.to_owned())).collect())
 }
@@ -87,7 +85,6 @@ fn random_id() -> String {
     format!("{:08x}", h.finish() as u32)
 }
 
-/// Written the way Jupyter writes notebooks: one-space indentation and a trailing newline.
 fn serialize(nb: &Object) -> String {
     let mut out = Vec::new();
     let mut ser = serde_json::Serializer::with_formatter(&mut out, serde_json::ser::PrettyFormatter::with_indent(b" "));

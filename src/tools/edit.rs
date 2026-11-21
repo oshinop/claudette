@@ -3,7 +3,6 @@ use serde_json::json;
 use super::{ToolDefinition, ToolOutcome, ToolResult, Workspace, numbered, opt_bool, str_arg};
 use crate::json::Object;
 
-/// How many lines around the edit the result shows.
 const SNIPPET_CONTEXT: usize = 4;
 
 pub fn definition() -> ToolDefinition {

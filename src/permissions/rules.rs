@@ -1,20 +1,3 @@
-//! `Read(…)` and `Edit(…)` permission rules, as Claude Code applies them to its own file tools.
-//!
-//! claude cannot apply them to the local tools: to it those are MCP tools, and Claude Code matches
-//! only bare names against MCP tools. So claudette applies them itself, with Claude Code's
-//! semantics (code.claude.com/docs/en/permissions, "Read and Edit"):
-//!
-//! - gitignore patterns, anchored by their prefix: `//path` at the filesystem root, `~/path` at the
-//!   home folder, `/path` at the source's own directory (the project for project and local settings
-//!   and the command line, `~/.claude` for user settings), `path` and `./path` at the working
-//!   directory. A relative single-folder pattern (`src/**`) matches at any depth in deny and ask
-//!   rules, only at the top in allow rules. `!` carves out of the earlier relative rules of the same
-//!   source and kind.
-//! - deny beats ask beats allow. A deny matches when the requested path or the file it resolves to
-//!   matches; an allow only when both do.
-//! - `Read` covers Read, Glob and Grep; `Edit` covers Edit, Write and NotebookEdit; a `Read` deny also
-//!   blocks Edit and Write (not NotebookEdit).
-
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -32,11 +15,8 @@ pub enum Behavior {
     Deny,
 }
 
-/// Where a rule comes from, which decides what a `/path` pattern is anchored at.
 pub struct Source<'a> {
-    /// The directory `/path` patterns anchor at.
     pub anchor: &'a Path,
-    /// `(behavior, rule)` pairs in the order the source lists them, such as `(Deny, "Read(./.env)")`.
     pub rules: Vec<(Behavior, String)>,
 }
 
@@ -51,7 +31,6 @@ pub struct PathRules {
     groups: Vec<Group>,
 }
 
-/// The tool family a path rule kind applies to.
 fn kind_of(tool: &str) -> Option<Kind> {
     match tool {
         "Read" => Some(Kind::Read),
@@ -60,7 +39,6 @@ fn kind_of(tool: &str) -> Option<Kind> {
     }
 }
 
-/// A rule such as `Read(./.env)` as (kind, pattern); None for bare names and other tools.
 pub fn parse(rule: &str) -> Option<(Kind, &str)> {
     let (tool, rest) = rule.split_once('(')?;
     let pattern = rest.strip_suffix(')')?;
@@ -69,11 +47,9 @@ pub fn parse(rule: &str) -> Option<(Kind, &str)> {
 }
 
 impl PathRules {
-    /// Builds the rules of each source; `cwd` is the session's working directory, `home` the home folder.
     pub fn new(sources: &[Source], cwd: &Path, home: &Path) -> PathRules {
         let mut groups = vec![];
         for source in sources {
-            // (kind, behavior, anchor) → patterns, in order, so a `!` reaches the rules before it.
             let mut builders: Vec<(Kind, Behavior, PathBuf, GitignoreBuilder)> = vec![];
             for (behavior, rule) in &source.rules {
                 let Some((kind, pattern)) = parse(rule) else { continue };
@@ -103,8 +79,6 @@ impl PathRules {
         })
     }
 
-    /// The decision for a tool touching `path` (already resolved against the working directory):
-    /// None when no rule says anything.
     pub fn decide(&self, tool: &str, path: &Path) -> Option<Behavior> {
         let real = real_path(path);
         let paths: Vec<&Path> = if real == path { vec![path] } else { vec![path, real.as_path()] };
@@ -124,16 +98,13 @@ impl PathRules {
         paths.iter().all(|p| self.matches(kind, Behavior::Allow, p)).then_some(Behavior::Allow)
     }
 
-    /// A path no read may reach, for filtering search results.
     pub fn read_denied(&self, path: &Path) -> bool {
         self.decide("Read", path) == Some(Behavior::Deny)
     }
 }
 
-/// The directory a pattern anchors at, and the gitignore line for it there.
 fn anchor(pattern: &str, behavior: Behavior, source: &Path, cwd: &Path, home: &Path) -> (PathBuf, String) {
     if let Some(negated) = pattern.strip_prefix('!') {
-        // A carve-out reads relative to the working directory, whatever follows the `!`.
         return (cwd.to_path_buf(), format!("!{}", negated.trim_start_matches("./")));
     }
     if let Some(abs) = pattern.strip_prefix("//") {
@@ -146,13 +117,11 @@ fn anchor(pattern: &str, behavior: Behavior, source: &Path, cwd: &Path, home: &P
         return (source.to_path_buf(), pattern.to_owned());
     }
     let rel = pattern.strip_prefix("./").unwrap_or(pattern);
-    // A single-folder pattern (`src/**`) reaches nested copies in deny and ask rules only.
     let single_folder = rel.strip_suffix("/**").is_some_and(|folder| !folder.is_empty() && !folder.contains('/'));
     let line = if single_folder && behavior != Behavior::Allow { format!("**/{rel}") } else { rel.to_owned() };
     (cwd.to_path_buf(), line)
 }
 
-/// The file a path resolves to: its real path, or for a file not created yet, its real folder's.
 fn real_path(path: &Path) -> PathBuf {
     if let Ok(real) = path.canonicalize() {
         return real;
@@ -194,7 +163,6 @@ mod tests {
         assert_eq!(r.decide("Grep", &root.join("src/.env")), Some(Deny));
         assert_eq!(r.decide("Read", &root.join("src/app.ts")), Some(Allow));
         assert_eq!(r.decide("Read", &root.join("docs/a.md")), None);
-        // A Read deny also blocks writing the file, but not a notebook edit.
         assert_eq!(r.decide("Write", &root.join(".env")), Some(Deny));
         assert_eq!(r.decide("NotebookEdit", &root.join(".env")), None);
     }
@@ -218,7 +186,6 @@ mod tests {
         let r = rules(&[(Deny, "Read(~/.ssh/**)"), (Ask, "Edit(//etc/hosts)")], &[(Deny, "Read(/secrets/**)")], &root, &home);
         assert_eq!(r.decide("Read", &home.join(".ssh/id_rsa")), Some(Deny));
         assert_eq!(r.decide("Edit", Path::new("/etc/hosts")), Some(Ask));
-        // In user settings, `/secrets` is ~/.claude/secrets, not the project's.
         assert_eq!(r.decide("Read", &root.join("secrets/a")), None);
         assert_eq!(r.decide("Read", &home.join(".claude/secrets/a")), Some(Deny));
     }

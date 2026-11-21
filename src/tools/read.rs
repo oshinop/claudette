@@ -6,7 +6,6 @@ use crate::json::Object;
 
 const DEFAULT_LIMIT: usize = 2000;
 const MAX_LINE: usize = 2000;
-/// The API rejects images over 5 MB once base64-encoded.
 const MAX_IMAGE_BYTES: u64 = 3_750_000;
 
 fn image_type(ext: &str) -> Option<&'static str> {

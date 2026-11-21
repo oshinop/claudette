@@ -30,7 +30,6 @@ describe("tools and permissions", () => {
     const session = start(dir, { settingSources: ["project"], canUseTool: perms.canUseTool });
     await session.turn(`[[scenario:${id}]] write`);
     await session.close();
-    // The first write asks; the allow then covers the second; the ask rule still holds for src/.
     expect(perms.asked.map((a) => a.input.file_path)).toEqual([join(dir, "first.txt"), join(dir, "src", "asked.ts")]);
   });
 });

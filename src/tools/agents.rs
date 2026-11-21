@@ -1,5 +1,3 @@
-//! ListAgents and SendMessage, for this machine's sessions: see [`crate::peers`].
-
 use serde_json::json;
 
 use super::{ToolDefinition, ToolOutcome, ToolResult, opt_bool, opt_str};

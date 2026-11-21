@@ -1,26 +1,15 @@
-//! Settings: `~/.config/claudette/config.toml`, each overridden by its `CLAUDETTE_<KEY>` variable.
-
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
 #[derive(Clone)]
 pub struct Config {
-    /// Anything `ssh` accepts as a destination; ports, users and keys go in ~/.ssh/config.
     pub host: String,
-    /// The ssh command and its options, without the destination.
     pub ssh: Vec<String>,
-    /// The claude command on the remote machine.
     pub remote_claude: String,
-    /// A command on the remote machine that relays stdio to a Unix socket (`<cmd> -U <path>`).
     pub remote_nc: String,
-    /// Environment variables to pass to the remote claude by name (`forward_env`), always.
     pub forward_env: Vec<String>,
-    /// Whether Claude Code's own variables go to the remote claude as well, but for the ones bound
-    /// to this machine (`forward_claude_env`, on by default).
     pub forward_claude_env: bool,
-    /// Append every frame crossing the relay to this file (`log`). Holds prompts and file contents.
     pub log_file: Option<String>,
-    /// How long the remote machine keeps a session whose local machine went away, in seconds.
     pub detach_timeout: u64,
 }
 
@@ -28,15 +17,10 @@ pub fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// claudette's own configuration folder: `~/.config/claudette`.
 pub fn claudette_dir() -> PathBuf {
     home().join(".config").join("claudette")
 }
 
-/// The folder this user's runs keep their sockets in, the same for every process of the user however
-/// it was started (a host's background service may set its own `TMPDIR`): the per-user temporary
-/// folder on macOS, `XDG_RUNTIME_DIR` or a private `/tmp/claudette-<uid>` elsewhere. A folder
-/// another user owns or can write to is refused.
 pub fn runtime_dir() -> anyhow::Result<PathBuf> {
     let dir = platform_runtime_dir()?;
     check_private(&dir)?;
@@ -46,7 +30,6 @@ pub fn runtime_dir() -> anyhow::Result<PathBuf> {
 #[cfg(target_os = "macos")]
 fn platform_runtime_dir() -> anyhow::Result<PathBuf> {
     let mut buf = vec![0u8; 1024];
-    // SAFETY: confstr writes at most buf.len() bytes, NUL-terminated, and returns the length needed.
     let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
     anyhow::ensure!(n > 0 && n <= buf.len(), "cannot find this user's temporary folder");
     buf.truncate(n - 1);
@@ -63,10 +46,6 @@ fn platform_runtime_dir() -> anyhow::Result<PathBuf> {
     private_tmp_dir()
 }
 
-/// `/tmp/claudette-<uid>`, created private if missing and refused when another user owns it or
-/// can write to it. Short on purpose: it holds the shared ssh connection's socket, whose path (with
-/// `%C`'s 40 characters and the suffix ssh adds while creating it) must fit in 104 bytes, which the
-/// per-user temporary folder on macOS leaves no room for.
 pub fn private_tmp_dir() -> anyhow::Result<PathBuf> {
     let dir = PathBuf::from(format!("/tmp/claudette-{}", nix::unistd::getuid()));
     if let Err(e) = nix::unistd::mkdir(&dir, nix::sys::stat::Mode::from_bits_truncate(0o700))
@@ -87,31 +66,25 @@ fn check_private(dir: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The settings file. A key's variable is `CLAUDETTE_` and the key in capitals, and wins over it.
 pub fn config_file() -> PathBuf {
     claudette_dir().join("config.toml")
 }
 
-/// Every setting, as `config.toml` names it.
 const KEYS: [&str; 9] = ["host", "ssh", "remote_claude", "remote_nc", "forward_claude_env", "forward_env", "detach_timeout", "log", "prefix"];
 
 type Vars<'a> = &'a (dyn Fn(&str) -> Option<String> + Sync);
 
-/// Where settings come from: the variables, then the file.
 pub struct Settings<'a> {
     file: toml::Table,
     var: Vars<'a>,
 }
 
-/// A setting as given, and where, for errors.
 enum Given {
     Var(String, String),
     File(String, toml::Value),
 }
 
 impl<'a> Settings<'a> {
-    /// `text`: the file's content, if any. Unknown keys are refused, so a typo is not silently
-    /// ignored.
     pub fn new(text: Option<&str>, var: Vars<'a>) -> anyhow::Result<Settings<'a>> {
         let path = config_file();
         let file: toml::Table = match text {
@@ -141,7 +114,6 @@ impl<'a> Settings<'a> {
         })
     }
 
-    /// Words: from a variable or a string, split by `split`, or a TOML array of strings.
     pub fn list(&self, key: &str, split: fn(&str) -> Vec<String>) -> anyhow::Result<Option<Vec<String>>> {
         Ok(match self.given(key) {
             None => None,
@@ -162,7 +134,6 @@ impl<'a> Settings<'a> {
         })
     }
 
-    /// Seconds: `90`, or a string with a unit, `90s`, `30m`, `12h`.
     pub fn duration(&self, key: &str) -> anyhow::Result<Option<u64>> {
         let bad = |w: &str| anyhow::anyhow!("{w}: use seconds, or a number with s, m or h, such as \"12h\"");
         Ok(match self.given(key) {
@@ -175,7 +146,6 @@ impl<'a> Settings<'a> {
     }
 }
 
-/// This process's settings: the variables, then `config.toml`, read once.
 static SETTINGS: LazyLock<Result<Settings<'static>, String>> = LazyLock::new(|| {
     static VAR: fn(&str) -> Option<String> = |name| std::env::var(name).ok();
     let text = std::fs::read_to_string(config_file()).ok();
@@ -186,11 +156,8 @@ fn settings() -> anyhow::Result<&'static Settings<'static>> {
     SETTINGS.as_ref().map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Keepalives make a dead link fail in about a minute instead of hanging the protocol. OpenSSH keeps
-/// the first value it sees, so an earlier `-o` in CLAUDETTE_SSH still wins.
 const KEEPALIVE: [&str; 4] = ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"];
 
-/// Fail instead of prompting for a password, passphrase or host key.
 pub const BATCH: [&str; 2] = ["-o", "BatchMode=yes"];
 
 
@@ -198,8 +165,6 @@ pub fn is_ssh_binary(command: &str) -> bool {
     command == "ssh" || command.ends_with("/ssh")
 }
 
-/// What marks claudette's own commands (`+doctor`): `prefix`, `+` by default. A prefix starting with
-/// `-` is refused: it would take claude's options for claudette's commands.
 pub fn prefix() -> anyhow::Result<String> {
     let prefix = settings()?.text("prefix")?.unwrap_or_else(|| "+".into());
     anyhow::ensure!(!prefix.starts_with('-'), "prefix {prefix}: a prefix starting with `-` would take claude's options");
@@ -210,7 +175,6 @@ impl Config {
     pub fn load() -> anyhow::Result<Config> {
         let s = settings()?;
         let host = s.text("host")?.ok_or_else(|| anyhow::anyhow!("no remote host: set `host` in {} (or CLAUDETTE_HOST)", config_file().display()))?;
-        // ssh reads a destination starting with `-` as an option (`-oProxyCommand=…` runs a command here).
         anyhow::ensure!(!host.starts_with('-'), "the remote host {host:?} starts with `-`, which ssh would read as an option");
         let custom = s.list("ssh", |v| v.split_whitespace().map(str::to_owned).collect())?.unwrap_or_default();
         let mut ssh = if let Some(first) = custom.first() {
@@ -220,8 +184,6 @@ impl Config {
             }
             ssh
         } else {
-            // One shared connection: a host opens sessions and probes in quick succession. Its socket
-            // lives in a private folder, so no other user can put one there first.
             let mut ssh: Vec<String> = ["ssh", "-o", "ControlMaster=auto"].iter().map(|s| (*s).to_owned()).collect();
             ssh.push("-o".into());
             ssh.push(format!("ControlPath={}/%C", private_tmp_dir()?.display()));
@@ -230,8 +192,6 @@ impl Config {
             ssh
         };
         if is_ssh_binary(&ssh[0]) && !crate::run::is_tty() {
-            // Nobody can answer a prompt: a host's server, or a daemon still holding a shell's terminal,
-            // where ssh would ask on a terminal no one watches. After the `ssh` setting, so its own -o wins.
             ssh.extend(BATCH.iter().map(|s| (*s).to_owned()));
         }
         Ok(Config {
@@ -247,7 +207,6 @@ impl Config {
     }
 }
 
-/// An on/off variable: `1`, `true`, `yes`, `on` or `0`, `false`, `no`, `off`, in any case.
 fn parse_switch(value: &str) -> Option<bool> {
     match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -256,7 +215,6 @@ fn parse_switch(value: &str) -> Option<bool> {
     }
 }
 
-/// `90`, `90s`, `30m`, `12h`: seconds.
 fn parse_duration(text: &str) -> Option<u64> {
     let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len()));
     let n: u64 = number.parse().ok()?;
@@ -289,7 +247,6 @@ mod tests {
         let env = vars(&[("CLAUDETTE_HOST", "studio"), ("CLAUDETTE_DETACH_TIMEOUT", "30m")]);
         let s = Settings::new(Some(file), &env).unwrap();
         assert_eq!(s.text("host").unwrap().as_deref(), Some("studio"));
-        // An array keeps a word with a space in it, which a variable split on spaces can't.
         assert_eq!(s.list("ssh", |v| v.split_whitespace().map(str::to_owned).collect()).unwrap().unwrap(), ["ssh", "-o", "ProxyJump=bastion host"]);
         assert_eq!(s.list("forward_env", |v| v.split(',').map(str::to_owned).collect()).unwrap().unwrap(), ["AWS_REGION", "AWS_PROFILE"]);
         assert_eq!(s.switch("forward_claude_env").unwrap(), Some(false));

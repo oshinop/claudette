@@ -1,10 +1,3 @@
-//! `claudette +update`: replaces the builds the install script put in place with a release's, and the
-//! notice of a newer release that claudette's own commands show on a terminal.
-//!
-//! The builds are renamed into place, so a session already running keeps the build it started with
-//! (see [`crate::tunnel`], which holds its builds open), and the remote machine gets the new build on
-//! the next session.
-
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,11 +10,9 @@ use crate::VERSION;
 use crate::tunnel::{PLATFORMS, platform};
 
 const REPO: &str = "oshinop/claudette";
-/// How long the notice may hold up the command it follows.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// `0.10.1` and `v0.10.1` as numbers, so 0.10 comes after 0.9.
 pub fn version_tuple(v: &str) -> Vec<u64> {
     v.trim_start_matches('v').split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
@@ -34,15 +25,11 @@ fn client(timeout: Duration) -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder().user_agent(format!("claudette/{VERSION}")).timeout(timeout).build()?)
 }
 
-/// The latest release's tag, from where GitHub's `releases/latest` page leads; `None` before the
-/// first release. Unlike GitHub's API, the page has no rate limit for clients without a token.
 async fn latest_tag(client: &reqwest::Client) -> anyhow::Result<Option<String>> {
     let response = client.get(format!("https://github.com/{REPO}/releases/latest")).send().await?.error_for_status()?;
     Ok(response.url().path().rsplit_once("/releases/tag/").map(|(_, tag)| tag.to_owned()).filter(|t| !t.is_empty()))
 }
 
-/// The line claudette's own commands end with when a newer release is out. GitHub is asked each
-/// time, while the command runs; any failure means no notice.
 pub async fn notice(prefix: String) -> Option<String> {
     let tag = latest_tag(&client(CHECK_TIMEOUT).ok()?).await.ok()??;
     is_newer(&tag, VERSION).then(|| format!("claudette {} is out (this is {VERSION}): run `claudette {prefix}update`", tag.trim_start_matches('v')))
@@ -53,7 +40,6 @@ async fn fetch(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(response.bytes().await.with_context(|| format!("cannot download {url}"))?.to_vec())
 }
 
-/// The checksum `SHA256SUMS` lists for `name` (`<sum>  <name>`, or `*<name>` in binary mode).
 fn listed_sum<'a>(sums: &'a str, name: &str) -> Option<&'a str> {
     sums.lines().find_map(|line| {
         let (sum, file) = line.split_once(char::is_whitespace)?;
@@ -65,7 +51,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Files written beside the builds, removed unless renamed into place.
 struct Staged(Vec<(PathBuf, PathBuf)>);
 
 impl Drop for Staged {
@@ -76,7 +61,6 @@ impl Drop for Staged {
     }
 }
 
-/// `claudette +update [version]`: the latest release, or the one named.
 pub async fn update(version: Option<&str>) -> anyhow::Result<i32> {
     let exe = std::env::current_exe().and_then(std::fs::canonicalize).context("cannot find this claudette's executable")?;
     let own = format!("claudette-{}", platform());
@@ -87,7 +71,6 @@ pub async fn update(version: Option<&str>) -> anyhow::Result<i32> {
         exe.display()
     );
     let client = client(DOWNLOAD_TIMEOUT)?;
-    // A mirror, as for the install script, serves one release's files.
     let mirror = std::env::var("CLAUDETTE_DOWNLOAD_URL").ok().map(|u| u.trim().trim_end_matches('/').to_owned()).filter(|u| !u.is_empty());
     let (tag, base) = match mirror {
         Some(mirror) => {
@@ -118,7 +101,6 @@ pub async fn update(version: Option<&str>) -> anyhow::Result<i32> {
         builds.push((name, bytes));
     }
 
-    // Every build is written beside the old ones first, so a failure leaves the old ones whole.
     let mut staged = Staged(Vec::with_capacity(builds.len()));
     for (name, bytes) in &builds {
         let temp = dir.join(format!(".{name}.update-{}", std::process::id()));
@@ -131,7 +113,6 @@ pub async fn update(version: Option<&str>) -> anyhow::Result<i32> {
         println!("claudette {VERSION} is up to date");
         return Ok(0);
     }
-    // This machine's build last: until then, the link still finds a whole release.
     staged.0.sort_by_key(|(_, path)| path.file_name().is_some_and(|n| *n == *own));
     while let Some((temp, path)) = staged.0.first() {
         std::fs::rename(temp, path).with_context(|| format!("cannot replace {}", path.display()))?;
@@ -149,7 +130,6 @@ fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
-/// What a downloaded build says its version is: proof that it runs here.
 async fn run_version(build: &Path) -> anyhow::Result<String> {
     let out = Command::new(build).arg("+version").env("CLAUDETTE_PREFIX", "+").output().await.context("the downloaded claudette does not run here")?;
     let version = String::from_utf8_lossy(&out.stdout).trim().to_owned();

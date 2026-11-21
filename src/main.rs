@@ -35,7 +35,6 @@ use crate::tools::kill_all_commands;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Background sessions would run on the remote machine without this machine's tools or the sandbox.
 const BACKGROUND: &str = "{what} manages background sessions, which would run on the remote machine without this machine's tools \
 or the sandbox. To keep a session going without its terminal, run claudette inside tmux or screen here (a session waits \
 while the local machine sleeps); hosts such as T3 Code and Paseo manage sessions of their own. Sessions here list and message each \
@@ -68,7 +67,6 @@ async fn run(argv: Vec<String>) -> anyhow::Result<i32> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let _ = rustls::crypto::ring::default_provider().install_default();
-    // On the remote machine: the session helper, which runs its own runtime.
     if args.first().map(String::as_str) == Some("__helper") {
         std::process::exit(helper::main(&args[1..]));
     }

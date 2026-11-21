@@ -9,7 +9,6 @@ use super::{InputError, ToolDefinition, ToolOutcome, ToolResult, Workspace, opt_
 use crate::json::Object;
 
 const MAX_RESULTS: usize = 100;
-/// Stops a pattern like `**` in a huge tree from scanning forever.
 const MAX_SCANNED: usize = 200_000;
 
 pub fn definition() -> ToolDefinition {
@@ -35,7 +34,6 @@ pub fn definition() -> ToolDefinition {
     }
 }
 
-/// An absolute pattern searches from its literal leading directories (`/a/b/**/*.rs` searches `/a/b`).
 fn split_absolute(pattern: &str) -> Option<(PathBuf, String)> {
     if !pattern.starts_with('/') {
         return None;

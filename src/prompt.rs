@@ -1,5 +1,3 @@
-//! The local environment, appended to the system prompt in place of the remote machine's.
-
 use std::path::{Path, PathBuf};
 
 use tokio::process::Command;
@@ -28,7 +26,6 @@ async fn git_status(cwd: &Path) -> String {
     )
 }
 
-/// The CLAUDE.md files a local claude would load for this directory: the user's, then each ancestor's, nearest last.
 fn memory(cwd: &Path) -> String {
     let mut candidates: Vec<PathBuf> = vec![home().join(".claude").join("CLAUDE.md")];
     let dirs: Vec<&Path> = cwd.ancestors().collect();
@@ -50,14 +47,6 @@ fn memory(cwd: &Path) -> String {
     )
 }
 
-/// https://code.claude.com/docs/en/memory.md#import-additional-files specifies
-/// file-relative and absolute imports, home paths, four import hops, escaped spaces,
-/// and no imports in code spans or fenced blocks (or quoted paths).
-/// Imports go depth-first, in mention order, before the importing file: the docs'
-/// AGENTS.md example says imported instructions precede the rest of CLAUDE.md.
-/// Canonical paths make aliases and cycles load only once across all memory roots.
-/// Missing or unreadable files are skipped, just like absent memory roots; the
-/// memory docs do not specify a separate missing-import diagnostic.
 fn load_memory(path: &Path, home: &Path, depth: usize, seen: &mut std::collections::HashSet<PathBuf>, found: &mut Vec<String>) {
     let Ok(identity) = std::fs::canonicalize(path) else { return };
     if seen.contains(&identity) {
@@ -113,7 +102,6 @@ fn memory_imports(text: &str) -> Vec<String> {
                 if span == count {
                     span = 0;
                 } else if span == 0 {
-                    // An unmatched backtick is literal Markdown, not a code span.
                     let rest = &text.as_bytes()[line_offset + i + count..];
                     let mut end = 0;
                     let mut closes = false;
@@ -175,9 +163,6 @@ fn platform() -> &'static str {
     }
 }
 
-/// Appended to the system prompt. The remote claude starts with `excludeDynamicSections`, which keeps
-/// its own machine's working directory, git status and memory out of the system prompt; these are
-/// the local ones in their place.
 pub async fn environment_prompt(cwd: PathBuf, add_dirs: Vec<PathBuf>) -> String {
     let status = git_status(&cwd).await;
     let claude_md = memory(&cwd);

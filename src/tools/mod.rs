@@ -1,6 +1,3 @@
-//! The local replacements for Claude Code's file and shell tools, and for its tools that reach
-//! other sessions.
-
 mod agents;
 mod bash;
 mod edit;
@@ -61,7 +58,6 @@ impl ToolResult {
     }
 }
 
-/// A tool input the model got wrong; becomes an error result, as Claude Code's own validation does.
 pub struct InputError(pub String);
 
 pub type ToolOutcome = Result<ToolResult, InputError>;
@@ -96,7 +92,6 @@ pub fn opt_bool(input: &Object, key: &str) -> Result<Option<bool>, InputError> {
     }
 }
 
-/// Lexical join and normalization, like Node's `path.resolve`.
 pub fn resolve(base: &Path, path: &str) -> PathBuf {
     let joined = base.join(path);
     let mut out = PathBuf::new();
@@ -117,22 +112,15 @@ pub fn is_inside(path: &Path, dir: &Path) -> bool {
 }
 
 struct State {
-    /// The Bash tool's directory; `cd` in one command carries over to the next.
     cwd: PathBuf,
     reads: HashMap<PathBuf, SystemTime>,
     memory_files: HashSet<PathBuf>,
 }
 
-/// The state one session's tools share: the shell's working directory, which files were read
-/// (and at which modification time), and which memory files reached the model.
 pub struct Workspace {
-    /// The session's working directory: where the host started claude.
     pub root: PathBuf,
-    /// Further local directories the host granted (`--add-dir`, `additionalDirectories`).
     pub extra_dirs: Vec<PathBuf>,
-    /// The `Read(…)` and `Edit(…)` rules of the session's settings.
     pub rules: Arc<PathRules>,
-    /// The session's hooks, once the workspace is served: CwdChanged and what hooks set for Bash.
     hooks: OnceLock<Arc<crate::settings::Callbacks>>,
     state: Mutex<State>,
 }
@@ -156,8 +144,6 @@ impl Workspace {
         self.hooks.get().map(Arc::as_ref)
     }
 
-    /// The path a file tool call touches: its file, or for a search its folder (the working directory
-    /// when not given). None for other tools.
     pub fn target(&self, tool: &str, input: &Object) -> Option<PathBuf> {
         let path = match tool {
             "Read" | "Edit" | "Write" => input.get("file_path")?.as_str()?,
@@ -180,7 +166,6 @@ impl Workspace {
         resolve(&self.cwd(), path)
     }
 
-    /// Inside the working directory or one of the added directories; relative paths resolve like the tools resolve them.
     pub fn owns(&self, path: &str) -> bool {
         let absolute = self.resolve(path);
         std::iter::once(&self.root).chain(self.extra_dirs.iter()).any(|dir| is_inside(&absolute, dir))
@@ -192,8 +177,6 @@ impl Workspace {
         }
     }
 
-    /// Instructions for a resolved file path, once per memory file, from the working root's children
-    /// down to the file's folder. The root and its ancestors are already in the environment prompt.
     pub fn nested_memory(&self, path: &Path) -> Option<String> {
         let parent = path.parent()?;
         let root = std::iter::once(&self.root)
@@ -203,7 +186,6 @@ impl Workspace {
         let relative = parent.strip_prefix(root).ok()?;
         let mut dir = root.to_path_buf();
         let mut text = String::new();
-        // Keep discovery and marking together so concurrent tool calls cannot attach a folder twice.
         let mut state = self.state.lock().unwrap();
         for component in relative.components() {
             dir.push(component);
@@ -214,15 +196,12 @@ impl Workspace {
                 }
                 let Ok(contents) = std::fs::read_to_string(&memory) else { continue };
                 state.memory_files.insert(memory.clone());
-                // memory.md documents lazy loading and nearest-last order, but not its exact wrapper.
-                // Use a plain system-reminder with the path and contents, as conversation context.
                 text.push_str(&format!("\n\n<system-reminder>\nContents of {}:\n\n{contents}\n</system-reminder>", memory.display()));
             }
         }
         if text.is_empty() { None } else { Some(text) }
     }
 
-    /// Claude Code refuses to overwrite a file it has not read, or one that changed since it read it.
     pub fn check_fresh(&self, path: &Path) -> Option<&'static str> {
         let seen = self.state.lock().unwrap().reads.get(path).copied();
         let Some(seen) = seen else {
@@ -237,7 +216,6 @@ impl Workspace {
     }
 }
 
-/// Lines with their numbers, the way `cat -n` prints them.
 pub fn numbered(lines: &[&str], first_line: usize) -> String {
     lines.iter().enumerate().map(|(i, line)| format!("{:>6}\t{line}", first_line + i)).collect::<Vec<_>>().join("\n")
 }
@@ -249,7 +227,6 @@ pub struct ToolDefinition {
     pub annotations: Option<Value>,
 }
 
-/// The tools, in Claude Code's own order.
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         bash::definition(),
@@ -265,7 +242,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
 }
 
 pub async fn run(name: &str, input: &Object, ws: &Workspace, cancel: &tokio_util::sync::CancellationToken) -> ToolResult {
-    // Deny rules hold however the call got approved: a pre-approval or a permission answer cannot lift them.
     if let Some(path) = ws.target(name, input)
         && ws.rules.decide(name, &path) == Some(Behavior::Deny)
     {

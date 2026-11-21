@@ -1,47 +1,26 @@
-//! The stream between claudette here and its holder on the remote machine, carried over ssh's
-//! stdio. It survives ssh going away: every frame but HELLO and ACK has a sequence number, each side
-//! keeps what the other has not acknowledged, and after a reconnect each resends from where the other
-//! says it got to. A frame is `u32 length | u64 sequence (0 = none) | u8 kind | body`, big-endian.
-//!
-//! Both ends use it: [`crate::tunnel`] here, [`crate::helper`] on the remote machine. Before the
-//! frames, the helper's bridge prints one status line ([`READY`], [`MISSING`] or [`GONE`]).
-
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Bumped when frames change; both ends run the same build, so this only guards against mix-ups.
 pub const PROTOCOL: u32 = 1;
-/// Largest frame accepted.
 const MAX_FRAME: usize = 16 << 20;
-/// Unacknowledged bytes a side holds before its senders wait: what piles up while ssh is away.
 const MAX_UNACKED: usize = 64 << 20;
 
-/// Channel 0 is claude's stdio (or its terminal), 1 its stderr; sockets get 2 and up.
 pub const STDIO: u32 = 0;
 pub const STDERR: u32 = 1;
 
-/// The first line the bridge prints, before the frames: the binary ran and reached the holder.
 pub const READY: &str = "claudette helper ready";
-/// Printed instead when the binary for this machine is not there yet, with the platform after it.
 pub const MISSING: &str = "claudette helper missing";
-/// Printed by `connect` without `--spawn` when the run has no holder any more.
 pub const GONE: &str = "claudette helper gone";
 
-/// What the holder runs, sent once at the start of a run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Start {
-    /// The session, as a POSIX shell script: the workspace setup, then claude.
     pub command: String,
-    /// The Unix sockets the holder serves for this machine, by index.
     pub sockets: Vec<String>,
-    /// A terminal of this size for claude's interface; pipes otherwise.
     pub pty: Option<(u16, u16)>,
-    /// Extra environment for the session (the terminal's `TERM`, say).
     pub env: Map<String, Value>,
-    /// How long the holder keeps a session whose local machine has gone away.
     pub detach_timeout: u64,
 }
 
@@ -69,28 +48,18 @@ impl Start {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
-    /// First frame each way on every connection: JSON with `protocol`, `run`, `received`, `fresh`.
     Hello(Value),
-    /// Local → holder, once: what to run (JSON, see [`Start`]).
     Start(Value),
-    /// Local → holder, before Start: a private run file, by basename.
     File { name: String, data: Vec<u8> },
     Data(u32, Vec<u8>),
-    /// Holder → local: a connection arrived on socket `index`, as channel `chan`.
     Open { chan: u32, index: u32 },
-    /// The side that sends it has nothing more to write on the channel.
     Close(u32),
     Resize { rows: u16, cols: u16 },
     Signal(i32),
-    /// Holder → local: the session ended with this code.
     Exit(i32),
-    /// Local → holder: this machine is done; end the session.
     Bye,
-    /// Every frame up to this sequence number arrived.
     Ack(u64),
-    /// Local → holder: one line for claude's inbox.
     Deliver(Vec<u8>),
-    /// Holder → local: something to tell the user.
     Notice(String),
 }
 
@@ -172,7 +141,6 @@ impl Frame {
     }
 }
 
-/// Reads one frame and its sequence number.
 pub async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> std::io::Result<(u64, Frame)> {
     let len = reader.read_u32().await? as usize;
     if !(9..=MAX_FRAME).contains(&len) {
@@ -193,14 +161,10 @@ struct Out {
     bytes: usize,
 }
 
-/// One side of the resumable stream.
 pub struct Link {
     out: tokio::sync::Mutex<Out>,
-    /// Bumped when frames are acknowledged, so blocked senders look again.
     room: tokio::sync::watch::Sender<u64>,
-    /// The last sequence number received in order.
     received: AtomicU64,
-    /// The last acknowledgement sent.
     acked: AtomicU64,
 }
 
@@ -216,8 +180,6 @@ impl Default for Link {
 }
 
 impl Link {
-    /// Sends a frame, now if connected, otherwise once reconnected. Waits while too much is
-    /// unacknowledged, which holds back the sources feeding it.
     pub async fn send(&self, frame: &Frame) {
         let mut room = self.room.subscribe();
         loop {
@@ -243,7 +205,6 @@ impl Link {
         }
     }
 
-    /// Sends a frame without a sequence number (HELLO, ACK), only if connected.
     pub async fn send_now(&self, frame: &Frame) {
         let mut out = self.out.lock().await;
         if let Some(writer) = out.writer.as_mut()
@@ -253,7 +214,6 @@ impl Link {
         }
     }
 
-    /// Drops frames the other side has.
     pub async fn acknowledged(&self, upto: u64) {
         let mut out = self.out.lock().await;
         while out.unacked.front().is_some_and(|(seq, _)| *seq <= upto) {
@@ -264,8 +224,6 @@ impl Link {
         self.room.send_replace(upto);
     }
 
-    /// A new connection: the other side has everything up to `peer_received`; the rest is sent again,
-    /// in order, before anything new.
     pub async fn attach(&self, mut writer: Writer, peer_received: u64) -> std::io::Result<()> {
         self.acknowledged(peer_received).await;
         let mut out = self.out.lock().await;
@@ -285,8 +243,6 @@ impl Link {
         self.received.load(Ordering::SeqCst)
     }
 
-    /// Whether a received sequenced frame is new (and so to be handled). A gap means frames were
-    /// lost, which a correct peer never causes: the connection is then given up.
     pub fn accept(&self, seq: u64) -> std::io::Result<bool> {
         let last = self.received.load(Ordering::SeqCst);
         if seq <= last {
@@ -299,7 +255,6 @@ impl Link {
         Ok(true)
     }
 
-    /// Acknowledges what arrived since the last acknowledgement.
     pub async fn ack(&self) {
         let received = self.received();
         if received > self.acked.swap(received, Ordering::SeqCst) {
@@ -307,15 +262,12 @@ impl Link {
         }
     }
 
-    /// Reads frames until the connection ends: acknowledgements are applied, duplicates dropped, and
-    /// the rest handed to `handle` in order. Acknowledges every 64 frames and on a timer.
     pub async fn receive<R, F, Fut>(&self, mut reader: R, mut handle: F) -> std::io::Result<()>
     where
         R: AsyncRead + Unpin,
         F: FnMut(Frame) -> Fut,
         Fut: Future<Output = ()>,
     {
-        // Two futures that live for the whole connection: a frame half read is never dropped.
         let reading = async {
             let mut since = 0u32;
             loop {
@@ -391,7 +343,6 @@ mod tests {
     #[tokio::test]
     async fn after_a_reconnect_only_the_unacknowledged_frames_go_again_in_order() {
         let link = Link::default();
-        // Disconnected: frames wait.
         for n in 0..3u32 {
             link.send(&Frame::Data(0, vec![n as u8])).await;
         }

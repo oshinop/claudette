@@ -4,7 +4,6 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { installRemoteServer, MOCK_API, modelRequests, onRemote, project, projectKey, remoteDir, scenario, start, type Step, until } from "./harness";
 
-/** claudette used the way a person (or T3 Code's text generation) uses claude: one -p run. */
 function claude(dir: string, args: string[], env: Record<string, string> = {}) {
   const log = join(mkdtempSync(join(tmpdir(), "log-")), "claudette.log");
   const proc = Bun.spawnSync(["claudette", ...args], { cwd: dir, env: { ...process.env, CLAUDETTE_LOG: log, ...env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -13,7 +12,6 @@ function claude(dir: string, args: string[], env: Record<string, string> = {}) {
   try {
     result = JSON.parse(stdout);
   } catch {
-    // Left empty: the assertions show stdout and stderr.
   }
   const entries = readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { dir: string; line: string });
   const spawn = entries.find((e) => e.dir === "spawn")?.line ?? "";
@@ -21,8 +19,6 @@ function claude(dir: string, args: string[], env: Record<string, string> = {}) {
   return { code: proc.exitCode, result, out: `${stdout}\n${proc.stderr.toString()}`, spawn, hooks };
 }
 
-/** Files a run leaves in the remote machine's /tmp, and sockets still bound there, once the holder
- * has had the moment it takes to hear the goodbye. */
 const leftoverSockets = async () => {
   const count = () => onRemote("{ ls /tmp/claudette-* 2>/dev/null; grep claudette /proc/net/unix; } | wc -l");
   await until(() => count() === "0", 5_000);
@@ -48,7 +44,6 @@ describe("claudette as claude, with -p", () => {
     for (const builtin of ["Read", "Write", "Bash"]) expect(first!.tools).not.toContain(builtin);
     expect(first!.system).toContain(`Working directory: ${dir}`);
     expect(await leftoverSockets()).toBe("0");
-    // The hook made the acceptEdits decision claude does not make for MCP tools.
     expect(run.hooks).toContainEqual({ tool: "Write", mode: "acceptEdits", decision: { behavior: "allow" } });
   });
 
@@ -78,7 +73,6 @@ describe("claudette as claude, with -p", () => {
     expect(run.result.result, run.out).toBe("denied=true");
     const requests = await modelRequests(id);
     expect(requests[0]!.tools.filter((t) => t.startsWith("mcp__cc__")).sort()).toEqual(["mcp__cc__Bash", "mcp__cc__Glob", "mcp__cc__Grep", "mcp__cc__Read"]);
-    // The allowed command ran on the local machine and saw its repository.
     expect(JSON.stringify(requests[1]!.messages.at(-1))).toContain(" init");
     expect(run.hooks.map((h) => h.decision?.behavior)).toEqual(["allow", "deny"]);
   });
@@ -87,19 +81,12 @@ describe("claudette as claude, with -p", () => {
     const dir = project();
     const run = claude(dir, ["-p", "title please", "--output-format", "json", "--tools", ""]);
     expect(run.result.result, run.out).toBe("ok");
-    // The workspace (its SFTP server and the project's hook callbacks), the sessions folder,
-    // claudette's own hook, which also reports whether the session is working or idle, and the
-    // socket the Claude Code folder's saves come back on (this machine has no settings file to
-    // send), and the socket links and the clipboard reach. The session's settings, the appended system
-    // prompt and the MCP configuration, which holds only the inbox relay, come with the run's first
-    // frames, off the remote command line.
     expect(JSON.parse(run.spawn).sockets).toBe(6);
   });
 
   test("the remote claude sees the project at its folder, and nothing else of the remote machine's home", async () => {
     const dir = project({ "local.txt": "from the local machine\n" });
     onRemote("mkdir -p ~/secret && echo hidden > ~/secret/s.txt");
-    // A stand-in for claude on the remote machine that reports what it can reach.
     onRemote(
       `cat > /tmp/probe-claude <<'EOF'
 #!/bin/sh
@@ -166,7 +153,6 @@ chmod 755 /tmp/probe-claude`,
 
   test("sessions live on the local machine: --continue picks up the last one, and the remote machine's earlier ones move to the local machine", async () => {
     const dir = project();
-    // A session the remote machine kept for this project before sessions moved to the local machine.
     const folder = `$(mkdir -p ${remoteDir(dir)} && cd ${remoteDir(dir)} && pwd -P | sed 's/[^a-zA-Z0-9]/-/g')`;
     onRemote(`P=~/.claude/projects/${folder}; mkdir -p "$P" && echo '{"type":"summary"}' > "$P/kept-on-remote.jsonl"`);
     const id = await scenario([{ text: "turn-done" }]);
@@ -189,7 +175,6 @@ chmod 755 /tmp/probe-claude`,
 
 const FIXTURE = "/app/fixtures/stdio-mcp.ts";
 
-/** `claude mcp …`, as a user who aliased claude to claudette types it. */
 const mcp = (dir: string, ...args: string[]) => {
   const run = Bun.spawnSync(["claudette", "mcp", ...args], { cwd: dir, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   return { code: run.exitCode, out: `${run.stdout}${run.stderr}` };
@@ -213,7 +198,6 @@ describe("MCP servers: all configured on the local machine, each running where i
 
   test("a server set to run remotely runs on the remote machine, with its secrets kept off the command line; the remote machine's own servers never start", async () => {
     const server = installRemoteServer();
-    // A server in the remote machine's own configuration: claudette must not let it in.
     onRemote(`claude mcp add --scope user remote-own -- node ${server} >/dev/null 2>&1`);
     try {
       const dir = project();
@@ -340,7 +324,6 @@ describe("MCP servers: all configured on the local machine, each running where i
   test("user and local scope land in the local machine's ~/.claude.json, where a local claude keeps them, and the server runs", async () => {
     const claudeJson = join(homedir(), ".claude.json");
     const before = existsSync(claudeJson) ? readFileSync(claudeJson, "utf8") : undefined;
-    // An existing ~/.claude.json from Claude Code: its other keys stay.
     writeFileSync(claudeJson, JSON.stringify({ theme: "dark", projects: {} }));
     try {
       const dir = project();
@@ -359,7 +342,6 @@ describe("MCP servers: all configured on the local machine, each running where i
       expect(mcp(dir, "remove", "local-where").code).toBe(0);
       expect(mcp(dir, "remove", "user-where").code).toBe(0);
       expect(mcp(dir, "list").out).toContain("No MCP servers configured");
-      // A ~/.claude.json that does not parse is left alone rather than replaced.
       writeFileSync(claudeJson, "{ not json");
       expect(mcp(dir, "add", "--scope", "user", "x", "--", "y").code).not.toBe(0);
       expect(readFileSync(claudeJson, "utf8")).toBe("{ not json");
@@ -392,7 +374,6 @@ describe("plugins: Claude Code's own installer, working on the local machine's s
       const installed = plugin("install", "lint@market");
       expect(installed.code, installed.out).toBe(0);
 
-      // The store reads as a local claude would have left it: this machine's paths, its own keys kept.
       const registry = JSON.parse(readFileSync(join(claudeDir, "plugins/installed_plugins.json"), "utf8"));
       const installPath = registry.plugins["lint@market"][0].installPath;
       expect(installPath).toBe(join(claudeDir, "plugins/cache/market/lint/1.0.0"));
@@ -404,7 +385,6 @@ describe("plugins: Claude Code's own installer, working on the local machine's s
       expect(settings.extraKnownMarketplaces.market.source.path).toBe(market);
       expect(settings.env).toEqual({ KEPT: "1" });
       expect(plugin("list").out).toContain("lint@market");
-      // Nothing of it lands on the remote machine.
       expect(onRemote("ls ~/.claude/plugins/cache 2>/dev/null; ls -d /tmp/claudette-*.store 2>/dev/null")).toBe("");
 
       const dir = project();
@@ -420,7 +400,6 @@ describe("plugins: Claude Code's own installer, working on the local machine's s
   });
 });
 
-/** A stand-in for Chromium: records its arguments, then loads the link through the SOCKS5 proxy it was given, as Chromium would. */
 const FAKE_CHROMIUM = `#!/usr/bin/env bun
 const net = require("node:net");
 const args = process.argv.slice(2);

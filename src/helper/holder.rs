@@ -1,5 +1,3 @@
-//! The remote side of a run: the bridge ssh runs, and the holder that owns the session.
-
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
@@ -16,7 +14,6 @@ use tokio::sync::mpsc;
 use super::control_path;
 use crate::link::{Frame, GONE, Link, PROTOCOL, READY, STDERR, STDIO, Start, read_frame};
 
-/// Data for a channel's writer; `None` = the other side finished writing.
 type Queue = mpsc::UnboundedSender<Option<Vec<u8>>>;
 
 fn log_path(run: &str) -> PathBuf {
@@ -27,7 +24,6 @@ fn valid_file_name(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Bridges ssh's stdio to the run's holder, starting the holder first with `spawn`.
 pub async fn connect(run: &str, spawn: bool) -> i32 {
     let path = control_path(run);
     let mut conn = UnixStream::connect(&path).await;
@@ -54,7 +50,6 @@ pub async fn connect(run: &str, spawn: bool) -> i32 {
     }
     let (mut from_holder, mut to_holder) = conn.into_split();
     let mut stdin = tokio::io::stdin();
-    // Whichever side ends first ends the bridge; the holder carries on without it.
     tokio::select! {
         _ = tokio::io::copy(&mut stdin, &mut to_holder) => {}
         _ = async {
@@ -74,53 +69,39 @@ pub async fn connect(run: &str, spawn: bool) -> i32 {
     0
 }
 
-/// Starts the holder as its own session, so ssh's hangup never reaches it.
 fn spawn_holder(run: &str) -> std::io::Result<()> {
     let log = std::fs::File::options().create(true).append(true).open(log_path(run))?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command.args(["__helper", "hold", run]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log);
-    // SAFETY: setsid is async-signal-safe and touches nothing in the parent.
     unsafe {
         command.pre_exec(|| nix::unistd::setsid().map(|_| ()).map_err(std::io::Error::from));
     }
     command.spawn().map(|_| ())
 }
 
-/// The session being held.
 struct Holder {
     run: String,
     link: Link,
     started: AtomicBool,
-    /// Writers of open channels, by channel.
     chans: Mutex<HashMap<u32, Queue>>,
     next_chan: AtomicU32,
-    /// The session's process group, once started.
     group: AtomicU32,
-    /// The pty's controlling side, for resizing.
     pty: Mutex<Option<Arc<OwnedFd>>>,
-    /// Sockets and run files made by this holder, removed at the end.
     sockets: Mutex<Vec<PathBuf>>,
     files: Mutex<Vec<PathBuf>>,
-    /// Bumped per connection, so only the latest one marks the holder detached.
     generation: AtomicU64,
     connected: AtomicBool,
-    /// Set when the session has ended (its exit code sent) or the local machine said goodbye.
     ended: tokio::sync::Notify,
     bye: AtomicBool,
     exited: AtomicBool,
     detach_timeout: AtomicU64,
-    /// The inbox relay claude started (`__helper inbox`), once connected.
     relay: tokio::sync::Mutex<Option<tokio::net::unix::OwnedWriteHalf>>,
 }
 
-/// How long a holder whose session has ended waits for a detached local machine to collect the exit code.
 const EXITED_DETACH_TIMEOUT: u64 = 600;
 
-/// The holder: serves the run until the session ends and the local machine has heard, the local machine says
-/// goodbye, or the local machine stays away longer than the detach timeout.
 pub async fn hold(run: &str) -> i32 {
     let _build = super::builds::hold();
-    // Everything the holder makes is for this user only.
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     let path = control_path(run);
     let _ = std::fs::remove_file(&path);
@@ -146,7 +127,6 @@ pub async fn hold(run: &str) -> i32 {
         ended: tokio::sync::Notify::new(),
         bye: AtomicBool::new(false),
         exited: AtomicBool::new(false),
-        // Until the start says otherwise: a holder nobody starts goes away soon.
         detach_timeout: AtomicU64::new(60),
         relay: tokio::sync::Mutex::new(None),
     });
@@ -158,7 +138,6 @@ pub async fn hold(run: &str) -> i32 {
         tokio::select! {
             accepted = listener.accept() => {
                 let Ok((conn, _)) = accepted else { continue };
-                // A reconnect can arrive before the old connection is noticed gone: the new one wins.
                 if let Some(old) = current.take() {
                     old.abort();
                     holder.link.detach().await;
@@ -188,7 +167,6 @@ pub async fn hold(run: &str) -> i32 {
 }
 
 impl Holder {
-    /// One connection from claudette, until it ends.
     async fn serve(self: Arc<Self>, conn: UnixStream, generation: u64) {
         let (mut read, mut write) = conn.into_split();
         let peer = match read_frame(&mut read).await {
@@ -291,10 +269,8 @@ impl Holder {
         }
     }
 
-    /// Serves the sockets and runs the session.
     async fn start(self: Arc<Self>, start: Start) -> std::io::Result<()> {
         self.detach_timeout.store(start.detach_timeout.max(1), Ordering::SeqCst);
-        // The inbox relay connects here once claude has started it.
         let relay = super::relay_path(&self.run);
         let _ = std::fs::remove_file(&relay);
         let relay_listener = UnixListener::bind(&relay)?;
@@ -321,7 +297,6 @@ impl Holder {
         if let Some((rows, cols)) = start.pty { self.run_pty(&start, rows, cols) } else { self.run_pipes(&start) }
     }
 
-    /// A connection on one of the sockets: a new channel to the local machine.
     async fn open(self: Arc<Self>, conn: UnixStream, index: u32) {
         let chan = self.next_chan.fetch_add(1, Ordering::SeqCst);
         let (mut read, mut write) = conn.into_split();
@@ -349,7 +324,6 @@ impl Holder {
         });
     }
 
-    /// The session on pipes: claude's stdio is channel 0, its stderr channel 1.
     fn run_pipes(self: Arc<Self>, start: &Start) -> std::io::Result<()> {
         let mut child = tokio::process::Command::new("/bin/sh")
             .arg("-c")
@@ -382,7 +356,6 @@ impl Holder {
         Ok(())
     }
 
-    /// Sends what a stream gives on a channel, then closes it.
     fn pump(self: Arc<Self>, mut stream: impl tokio::io::AsyncRead + Unpin + Send + 'static, chan: u32) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut buf = vec![0u8; 32 * 1024];
@@ -396,7 +369,6 @@ impl Holder {
         })
     }
 
-    /// The session in a terminal, for claude's interface: the terminal is channel 0.
     fn run_pty(self: Arc<Self>, start: &Start, rows: u16, cols: u16) -> std::io::Result<()> {
         let size = nix::pty::Winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
         let pty = nix::pty::openpty(Some(&size), None).map_err(std::io::Error::from)?;
@@ -411,7 +383,6 @@ impl Holder {
             .stdin(std::process::Stdio::from(slave.try_clone()?))
             .stdout(std::process::Stdio::from(slave.try_clone()?))
             .stderr(std::process::Stdio::from(slave));
-        // SAFETY: only async-signal-safe calls: a new session, with the terminal as its controlling one.
         unsafe {
             command.pre_exec(|| {
                 nix::unistd::setsid().map_err(std::io::Error::from)?;
@@ -425,7 +396,6 @@ impl Holder {
         self.group.store(child.id(), Ordering::SeqCst);
         *self.pty.lock().unwrap() = Some(master.clone());
 
-        // A terminal has no async reads here: a thread each way.
         let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
         self.chans.lock().unwrap().insert(STDIO, tx);
         let mut writer = std::fs::File::from(master.try_clone()?);
@@ -473,8 +443,6 @@ impl Holder {
                 Ok(Ok(status)) => exit_code(status),
                 _ => 1,
             };
-            // The terminal stays open while the holder has it; what the session wrote last is read
-            // by now, give or take, so stop reading.
             tokio::time::sleep(Duration::from_millis(200)).await;
             out.abort();
             self.finish(code, vec![]).await;
@@ -482,18 +450,14 @@ impl Holder {
         Ok(())
     }
 
-    /// The session ended: what it wrote goes first, then its exit code.
     async fn finish(&self, code: i32, readers: Vec<tokio::task::JoinHandle<()>>) {
-        // Something the session left running may hold its output open: wait only so long.
         let _ = tokio::time::timeout(Duration::from_secs(3), futures_util::future::join_all(readers)).await;
         self.exited.store(true, Ordering::SeqCst);
         self.link.send(&Frame::Exit(code)).await;
-        // Only the exit code and the last output wait for the local machine now: no need to hold them long.
         self.detach_timeout.fetch_min(EXITED_DETACH_TIMEOUT, Ordering::SeqCst);
         self.ended.notify_one();
     }
 
-    /// Ends the session if it still runs, and removes what the holder made.
     async fn stop(&self) {
         if !self.exited.load(Ordering::SeqCst) && self.group.load(Ordering::SeqCst) != 0 {
             self.signal(libc::SIGTERM);
@@ -512,8 +476,6 @@ impl Holder {
         }
         for path in self.files.lock().unwrap().iter() {
             let _ = std::fs::remove_file(path);
-            // A near end's warm start, held while it ran: removed by the session's end, unless the
-            // session was killed.
             if path.extension().is_some_and(|e| e == "warm") {
                 let mut held = path.clone().into_os_string();
                 held.push(".held");
@@ -523,10 +485,6 @@ impl Holder {
         let _ = std::fs::remove_file(log_path(&self.run));
     }
 
-    /// Puts a line into claude's inbox. Through the inbox relay when claude has started it: a process
-    /// of claude's own, whose messages claude takes as from itself in any permission mode. Until then
-    /// (early in a session), straight into the inbox socket, which a session that skips permission
-    /// prompts holds for approval. The inbox may not be up yet: retried for half a minute.
     async fn deliver(&self, line: Vec<u8>) {
         let dir = inbox_dir(&self.run);
         let mut last_error = String::from("claude's inbox never appeared");
@@ -542,7 +500,6 @@ impl Holder {
                     *relay = None;
                 }
             }
-            // Give the relay a few seconds to come up before going around it.
             if attempt >= 6
                 && let Some(socket) = find_socket(&dir)
             {
@@ -557,13 +514,10 @@ impl Holder {
     }
 }
 
-/// The helper binary, for the session: claude starts the inbox relay with it.
 fn helper_env() -> Vec<(&'static str, String)> {
     std::env::current_exe().map(|exe| vec![(super::HELPER_ENV, exe.to_string_lossy().into_owned())]).unwrap_or_default()
 }
 
-/// One line into claude's inbox socket, after claude's token when there is one. The inbox reads lines
-/// as they come and never closes the connection itself, so it is closed a moment later.
 async fn post(socket: &Path, token: Option<String>, line: &[u8]) -> std::io::Result<()> {
     let mut conn = UnixStream::connect(socket).await?;
     let mut payload = Vec::new();
@@ -578,7 +532,6 @@ async fn post(socket: &Path, token: Option<String>, line: &[u8]) -> std::io::Res
     Ok(())
 }
 
-/// `__helper mcp`: serves the local-tools handshake from a run file and forwards tool calls.
 pub async fn mcp(socket: &str, manifest_file: &str) -> i32 {
     let Some(manifest) = std::fs::read_to_string(manifest_file).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v.as_object().cloned()) else { return 1 };
     let Ok(conn) = UnixStream::connect(socket).await else { return 1 };
@@ -619,7 +572,6 @@ pub async fn mcp(socket: &str, manifest_file: &str) -> i32 {
             }
             "ping" => id.map(|id| crate::mcp::rpc_result(id, json!({}))),
             "tools/list" => id.map(|id| crate::mcp::rpc_result(id, manifest.get("toolsListResult").cloned().unwrap_or_else(|| json!({})))),
-            // One way, so nothing waits; the laptop hears that claude has its tools.
             "notifications/initialized" => {
                 if write.write_all(format!("{line}\n").as_bytes()).await.is_err() { break }
                 None
@@ -641,15 +593,12 @@ pub async fn mcp(socket: &str, manifest_file: &str) -> i32 {
     0
 }
 
-/// The key every hook event from the remote side carries: when it was sent, in nanoseconds of the
-/// remote machine's clock. Events whose answer nobody waits for can reach the laptop out of order.
 pub const SENT_AT: &str = "claudetteSentAt";
 
 fn sent_now() -> Value {
     json!(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)))
 }
 
-/// A hook event with [`SENT_AT`] added; anything but a JSON object goes as it is.
 fn stamped(input: Vec<u8>) -> Vec<u8> {
     match serde_json::from_slice::<Value>(&input) {
         Ok(Value::Object(mut event)) => {
@@ -660,7 +609,6 @@ fn stamped(input: Vec<u8>) -> Vec<u8> {
     }
 }
 
-/// `__helper notify`: forwards hook input without waiting for a response.
 pub async fn notify(socket: &str) -> i32 {
     let mut input = Vec::new();
     if tokio::io::stdin().read_to_end(&mut input).await.is_err() { return 1 }
@@ -670,13 +618,8 @@ pub async fn notify(socket: &str) -> i32 {
     0
 }
 
-/// The key a PreToolUse event the remote side decided carries to the laptop, with the decision.
 pub const DECIDED: &str = "claudetteDecision";
 
-/// `__helper hook <rules> <socket>`: claudette's PreToolUse hook. A Bash call is decided here: the
-/// decision rests on the session's Bash rules alone (`{"allow": […], "deny": […]}`), which never
-/// change in a session without a host, so the laptop only hears of it. Any other call is the
-/// laptop's to decide (its path rules resolve its own files): its answer is the hook's.
 pub async fn hook(rules_file: &str, socket: &str) -> i32 {
     let mut input = Vec::new();
     if tokio::io::stdin().read_to_end(&mut input).await.is_err() {
@@ -714,9 +657,6 @@ pub async fn hook(rules_file: &str, socket: &str) -> i32 {
     0
 }
 
-/// `__helper inbox`: a stdio MCP server claude starts, with no tools. It exists to be claude's own
-/// process: it takes lines from the run's holder and posts them into claude's inbox (found through the
-/// environment claude gives its servers), so claude delivers them as from itself.
 pub async fn inbox(run: &str) -> i32 {
     use tokio::io::AsyncBufReadExt;
     let relay = super::relay_path(run);
@@ -770,7 +710,6 @@ pub async fn inbox(run: &str) -> i32 {
             }
         }
     };
-    // claude closes the server's stdin when the session ends.
     tokio::select! {
         () = relaying => {}
         () = serving => {}
@@ -778,13 +717,11 @@ pub async fn inbox(run: &str) -> i32 {
     0
 }
 
-/// The run's inbox folder (`CLAUDE_CODE_TMPDIR`), in /tmp's real path as the session script makes it.
 fn inbox_dir(run: &str) -> PathBuf {
     let tmp = std::fs::canonicalize("/tmp").unwrap_or_else(|_| PathBuf::from("/tmp"));
     tmp.join(format!("claudette-{run}.inbox"))
 }
 
-/// claude's inbox socket under its temporary folder (`cc-socks/<pid>.sock`).
 fn find_socket(dir: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::FileTypeExt;
     for sub in std::fs::read_dir(dir).ok()?.flatten() {
@@ -801,7 +738,6 @@ fn find_socket(dir: &Path) -> Option<PathBuf> {
 
 fn set_size(fd: &OwnedFd, rows: u16, cols: u16) {
     let size = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
-    // SAFETY: TIOCSWINSZ reads one winsize from a valid pointer on an open terminal descriptor.
     unsafe {
         libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ as _, &size);
     }

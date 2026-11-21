@@ -17,16 +17,12 @@ use crate::ssh::shell_quote;
 const DEFAULT_TIMEOUT: u64 = 120_000;
 const MAX_TIMEOUT: u64 = 600_000;
 const MAX_OUTPUT: usize = 30_000;
-/// Bytes kept from a command's output: enough for MAX_OUTPUT characters of any UTF-8.
 const MAX_OUTPUT_BYTES: usize = MAX_OUTPUT * 4;
 
-/// Every command runs in its own process group, so a timeout or an interrupt stops everything it
-/// started. Whatever is still running when the session ends goes with it, like Claude Code's shells.
 static GROUPS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 static COMMANDS: AtomicU64 = AtomicU64::new(0);
 
 fn kill_group(pid: u32) {
-    // Already gone is fine.
     let _ = nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL);
 }
 
@@ -37,15 +33,10 @@ pub fn kill_all_commands() {
     }
 }
 
-/// Drops the groups nothing runs in any more. Their ids get reused, by any process of this user, so
-/// a group kept after its last process ended could later stop a stranger's.
 fn forget_ended_groups() {
     GROUPS.lock().unwrap().retain(|pid| nix::sys::signal::killpg(nix::unistd::Pid::from_raw(*pid as i32), None).is_ok());
 }
 
-/// Background command logs and `cd` records: in the run folder, which goes away with the run; in a
-/// per-process temporary folder when there is none, and in tests, where hubs come and go (and remove
-/// their run folders) while other tests run commands.
 fn scratch() -> std::io::Result<&'static PathBuf> {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     let dir = DIR.get_or_init(|| match crate::sockets::run_dir().filter(|_| !cfg!(test)) {
@@ -57,10 +48,8 @@ fn scratch() -> std::io::Result<&'static PathBuf> {
 }
 
 fn command(script: &str, ws: &Workspace) -> Command {
-    // The shell's directory, unless it vanished; then the session root.
     let cwd = ws.cwd();
     let mut cmd = Command::new("bash");
-    // First, what SessionStart, CwdChanged and FileChanged hooks wrote to `CLAUDE_ENV_FILE`.
     match ws.hooks() {
         Some(hooks) => cmd.arg("-c").arg(format!("{}{script}", hooks.env_source())),
         None => cmd.arg("-c").arg(script),
@@ -95,7 +84,6 @@ fn run_in_background(script: &str, ws: &Workspace) -> ToolResult {
 #[derive(Default)]
 struct Output {
     bytes: Vec<u8>,
-    /// Characters dropped once `bytes` is full (UTF-8 lead bytes, so each character counts once).
     omitted: usize,
 }
 
@@ -120,7 +108,6 @@ async fn run_foreground(script: &str, timeout: u64, ws: &Workspace, cancel: &Can
         Err(e) => return ToolResult::fail(format!("Could not create a scratch directory: {e}")),
     };
     let pwd_file = scratch.join(format!("pwd-{}", COMMANDS.fetch_add(1, Ordering::Relaxed) + 1));
-    // stderr joins stdout so the output interleaves like a terminal; the trap records where `cd` left us.
     let wrapped = format!("exec 2>&1\ntrap 'pwd -P >| {}' EXIT\n{script}", shell_quote(&pwd_file.display().to_string()));
     let mut child = match command(&wrapped, ws).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
         Ok(child) => child,
@@ -149,7 +136,6 @@ async fn run_foreground(script: &str, timeout: u64, ws: &Workspace, cancel: &Can
             child.wait().await
         }
     };
-    // A backgrounded child (`cmd &`) can hold the pipes open after the shell exits. Don't wait for it.
     let drained = async {
         for reader in &readers {
             while !reader.is_finished() {

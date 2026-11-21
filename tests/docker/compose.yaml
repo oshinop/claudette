@@ -1,8 +1,5 @@
 name: claudette
 
-# Test topology. `local` runs claudette and the tests, `remote` runs sshd and the real Claude Code
-# CLI, `mockapi` stands in for the Anthropic API. The network is internal: nothing reaches the internet.
-# Build contexts are the repository root, two folders up; scripts/test.sh points compose here.
 services:
   keygen:
     image: claudette-remote
@@ -33,7 +30,6 @@ services:
       keygen: { condition: service_completed_successfully }
       mockapi: { condition: service_healthy }
     volumes: [keys:/keys:ro]
-    # FUSE for the sshfs workspace mount; user namespaces (unconfined seccomp/AppArmor) for bubblewrap.
     devices: [/dev/fuse]
     cap_add: [SYS_ADMIN]
     security_opt: [seccomp=unconfined, apparmor=unconfined]
@@ -51,7 +47,6 @@ services:
       MOCK_API: http://mockapi:8080
     networks: [claudette]
 
-  # The local machine again, with a T3 Code server whose Claude provider runs claudette.
   t3:
     image: claudette-t3
     build: { context: ../.., dockerfile: tests/docker/local.Dockerfile, target: t3 }
@@ -65,7 +60,6 @@ services:
     networks: [claudette]
     profiles: [planes]
 
-  # The local machine again, with a Paseo daemon whose Claude provider runs claudette.
   paseo:
     image: claudette-paseo
     build: { context: ../.., dockerfile: tests/docker/local.Dockerfile, target: paseo }

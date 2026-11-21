@@ -1,14 +1,3 @@
-//! Sits on the stream-json pipe between an Agent SDK host and the remote claude.
-//!
-//! Host → claude: `initialize` gains the local tool server, tool aliases and the local environment;
-//! `mcp_set_servers` hands process-transport servers to local bridges; permission answers get the
-//! local tools' rule names back.
-//!
-//! claude → host: `mcp_message` for relay-hosted servers is answered here and never reaches the host;
-//! `can_use_tool` for local tools is answered here when the session's rules allow it, and otherwise
-//! reaches the host under the built-in tool's name; transcript mirror frames are written locally;
-//! everything else loses the `mcp__cc__` prefix and the remote working directory.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,18 +19,14 @@ use crate::mount::workdir::PathMap;
 use crate::permissions::policy::{Decision, Policy, command_prefix};
 use crate::tools::Workspace;
 
-/// Per-call limit for the local tools: Bash's 10-minute maximum plus margin.
 const TOOL_TIMEOUT: u64 = 660_000;
 
-/// Control requests the relay itself sends to claude carry this id prefix; their answers stop here.
 const OWN_REQUEST: &str = "claudette-";
 
 pub type EnvPrompt = Shared<BoxFuture<'static, String>>;
 
-/// Writes one line to the host; synchronous, so lines reach the host in the order they were sent.
 pub type HostOut = Arc<dyn Fn(String) + Send + Sync>;
 
-/// Copies the MCP settings claude keeps for an SDK server (timeout, tool policy, loading).
 fn sdk_entry(name: &str, config: &Object) -> Value {
     let mut entry = json!({ "type": "sdk", "name": name });
     for key in ["timeout", "tools", "alwaysLoad"] {
@@ -90,19 +75,13 @@ pub struct Relay {
     ws: Arc<Workspace>,
     local_tools: Vec<&'static str>,
     config_server_configs: Vec<(String, LocalServer)>,
-    /// Servers the remote claude starts itself (from its MCP config file); they ride along in every set.
     remote_servers: Vec<(String, Object)>,
     host_mirror: bool,
-    /// The local tool server, unless the caller allowed none of the tools it replaces.
     local: Option<Arc<LocalTools>>,
     endpoints: Mutex<HashMap<String, Endpoint>>,
-    /// can_use_tool requests forwarded to the host; their answers can carry permission updates.
     permission_requests: Mutex<HashSet<String>>,
-    /// In-flight mcp_message requests from claude, by control request id.
     calls: Mutex<HashMap<String, CancellationToken>>,
-    /// The same calls by `<server>:<JSON-RPC id>`, for notifications/cancelled.
     rpc_calls: Mutex<HashMap<String, CancellationToken>>,
-    /// Calls claude withdrew with control_cancel_request; they get no answer.
     withdrawn: Mutex<HashSet<String>>,
     own_requests: Arc<AtomicU64>,
     elicitations: Arc<Mutex<HashMap<String, (String, Value)>>>,
@@ -178,7 +157,6 @@ impl Relay {
         })
     }
 
-    /// Replaces the remote working directory with the local one in a serialized message.
     pub fn map_paths(&self, json: &str) -> String {
         self.paths.map(json).into_owned()
     }
@@ -191,9 +169,6 @@ impl Relay {
         (self.to_host)(line);
     }
 
-    // ── host → claude ─────────────────────────────────────────────────────────────────────────────
-
-    /// One line from the host. Lines must be handled in order: await each before the next.
     pub async fn from_host(&self, line: String) {
         trace("in", &line);
         if !line.contains("\"control_") {
@@ -265,10 +240,8 @@ impl Relay {
         request.insert("sdkMcpServers".into(), json!(servers));
         if let Some(local) = &self.local {
             object_entry(request, "sdkMcpServerConfigs").insert(SERVER.into(), json!({ "timeout": TOOL_TIMEOUT }));
-            // The local server's handshake is known here; sending it saves claude two round trips over ssh.
             object_entry(request, "sdkMcpServerManifests").insert(SERVER.into(), local.manifest());
         }
-        // A built-in name the model emits anyway (a skill told it to use `Read`) reaches the local tool.
         let mut aliases: Object = self.local_tools.iter().map(|t| ((*t).to_owned(), json!(format!("{PREFIX}{t}")))).collect();
         if let Some(Value::Object(theirs)) = request.get("toolAliases") {
             aliases.extend(theirs.clone());
@@ -325,7 +298,6 @@ impl Relay {
         for endpoint in stale {
             endpoint.close().await;
         }
-        // The set replaces every dynamic server, so the relay's own ride along each time.
         if self.local.is_some() {
             next.insert(SERVER.into(), json!({ "type": "sdk", "name": SERVER, "timeout": TOOL_TIMEOUT }));
         }
@@ -350,9 +322,6 @@ impl Relay {
                 self.policy.set_mode(mode);
             }
             let allows = str_field(&update, "behavior") == Some("allow");
-            // A rule saved to a settings file stays in the update: claude writes it to the project's
-            // settings (on this machine, through the workspace) or the user's (on this machine, through
-            // the session's Claude Code folder), and the next session's policy reads it.
             let saved = str_field(&update, "destination").is_some_and(|d| d != "session" && d != "cliArg");
             if let Some(Value::Array(rules)) = update.get_mut("rules") {
                 rules.retain_mut(|rule| {
@@ -366,7 +335,6 @@ impl Relay {
                         return saved;
                     }
                     if is_local_tool(&tool) {
-                        // A bare allow ("always allow Write") covers the tool's paths no ask rule covers.
                         if allows && str_field(rule, "ruleContent").is_none() {
                             self.policy.allow_tool(&tool);
                         }
@@ -383,10 +351,6 @@ impl Relay {
         *updates = kept;
     }
 
-    // ── claude → host ─────────────────────────────────────────────────────────────────────────────
-
-    /// One line from the remote claude. MCP calls run concurrently; the returned task, if any,
-    /// finishes when the call is answered.
     pub fn from_claude(self: &Arc<Self>, line: &str) -> Option<tokio::task::JoinHandle<()>> {
         trace("out", line);
         if (line.contains("\"control_") || line.contains("\"transcript_mirror\"") || line.contains("\"init\""))
@@ -440,12 +404,9 @@ impl Relay {
                 if own { Intercepted::Handled } else { Intercepted::Pass }
             }
             Some("transcript_mirror") => {
-                // Only a host with its own session store asks for these; claude's own transcripts
-                // reach this machine through the mounted sessions folder.
                 if !self.host_mirror {
                     return Intercepted::Handled;
                 }
-                // The host keeps its own store: give it the frame with the path its store expects.
                 if let Some(local) = str_field(&frame, "filePath").and_then(|f| self.mirror.local_path(f)) {
                     frame.insert("filePath".into(), json!(local.to_string_lossy()));
                 }
@@ -499,7 +460,6 @@ impl Relay {
     }
 
     fn answer_mcp(&self, request_id: &str, response: Option<Value>) {
-        // A notification gets the same empty acknowledgement the SDK gives its in-process servers.
         let mcp_response = response.unwrap_or_else(|| json!({ "jsonrpc": "2.0", "result": {}, "id": 0 }));
         let frame = json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request_id, "response": { "mcp_response": mcp_response } } });
         self.send_claude(frame.to_string());
@@ -518,7 +478,6 @@ impl Relay {
                 }
                 let mut suggestions = vec![];
                 if name == "Bash" {
-                    // claude would offer to approve the whole MCP tool; offer the command instead.
                     if let Some(prefix) = command_prefix(str_field(&input, "command").unwrap_or("")) {
                         suggestions.push(json!({ "type": "addRules", "rules": [{ "toolName": "Bash", "ruleContent": format!("{prefix}:*") }], "behavior": "allow", "destination": "session" }));
                     }
@@ -558,11 +517,8 @@ impl Relay {
 }
 
 enum Intercepted {
-    /// The frame stops here.
     Handled,
-    /// An MCP call now running.
     Task(tokio::task::JoinHandle<()>),
-    /// The frame goes on to the host unchanged.
     Pass,
 }
 

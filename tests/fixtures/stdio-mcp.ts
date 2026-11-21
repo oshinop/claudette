@@ -1,4 +1,3 @@
-// A stdio MCP server the host configures; claudette must run it on the local machine.
 import { hostname } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

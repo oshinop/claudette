@@ -28,8 +28,6 @@ fail() {
   exit 1
 }
 
-# claudette's settings from the environment, as config.toml lines. Checked before anything is
-# downloaded, so a bad value fails early.
 toml_string() {
   case $1 in *"
 "*) fail "a setting can't hold a line break" ;; esac

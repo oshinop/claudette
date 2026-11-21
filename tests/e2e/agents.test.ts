@@ -6,7 +6,6 @@ import { modelRequests, onRemote, project, scenario, start } from "./harness";
 
 const MOCK = process.env.MOCK_API ?? "http://mockapi:8080";
 
-/** One `claudette -p` run; returns its result text, its spawn line and its output. */
 function runP(dir: string, prompt: string, env: Record<string, string> = {}) {
   const log = join(mkdtempSync(join(tmpdir(), "log-")), "claudette.log");
   const proc = Bun.spawnSync(["claudette", "-p", prompt, "--output-format", "json"], { cwd: dir, env: { ...process.env, CLAUDETTE_LOG: log, ...env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
@@ -14,13 +13,11 @@ function runP(dir: string, prompt: string, env: Record<string, string> = {}) {
   try {
     result = (JSON.parse(proc.stdout.toString()) as { result?: string }).result ?? "";
   } catch {
-    // Left empty: the assertions show the output.
   }
   const spawn = readFileSync(log, "utf8").split("\n").find((l) => l.includes('"dir":"spawn"')) ?? "";
   return { code: proc.exitCode, result, spawn, out: `${proc.stdout}\n${proc.stderr}` };
 }
 
-/** Every model request so far whose messages contain `text`. */
 async function requestsWith(text: string) {
   const all = (await (await fetch(`${MOCK}/_log`)).json()) as { messages: unknown[] }[];
   return all.filter((r) => JSON.stringify(r.messages).includes(text));
@@ -35,7 +32,6 @@ async function eventually<T>(get: () => Promise<T[]>, timeoutMs = 20_000): Promi
   }
 }
 
-/** A host session (like a T3 Code thread) that has finished one turn and is idle. */
 async function idleSession(dir: string, env: Record<string, string> = {}) {
   const id = await scenario([{ text: "ready" }]);
   const session = start(dir, { env: { ...process.env, ...env } });
@@ -59,7 +55,6 @@ describe("sessions on this local machine reach each other locally", () => {
       expect(run.result, run.out).toStartWith(`Delivered to ${basename(api)} [`);
 
       const [first, second] = await modelRequests(id);
-      // The local versions, never Claude Code's own: those would reach every session on the remote machine.
       expect(first!.tools).toContain("mcp__cc__ListAgents");
       expect(first!.tools).toContain("mcp__cc__SendMessage");
       expect(first!.tools).not.toContain("ListAgents");
@@ -86,7 +81,6 @@ describe("sessions on this local machine reach each other locally", () => {
     const near = await idleSession(mine);
     const farDir = project();
     const far = await idleSession(farDir, { XDG_RUNTIME_DIR: other });
-    // A session started on the remote machine directly, alive while the listing runs, in a folder of its own.
     const remoteId = await scenario([{ tool: "Bash", input: { command: "sleep 8" } }, { text: "done" }]);
     const onTheRemote = Bun.spawn(["ssh", "remote", `mkdir -p /tmp/remote-native && cd /tmp/remote-native && claude -p '[[scenario:${remoteId}]] wait' --name remote-native --allowedTools Bash`], { stdout: "ignore", stderr: "ignore" });
     try {
@@ -98,7 +92,6 @@ describe("sessions on this local machine reach each other locally", () => {
       expect(run.result).not.toContain(basename(farDir));
       expect(run.result).not.toContain("remote-native");
     } finally {
-      // Let the remote machine's own session finish, then take away the transcript it kept there.
       await onTheRemote.exited;
       onRemote("rm -rf /tmp/remote-native ~/.claude/projects/-tmp-remote-native");
       await near.close();
@@ -137,7 +130,6 @@ describe("what stays off", () => {
     }
     const run = runP(dir, "hi", { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" });
     expect(run.code, run.out).toBe(0);
-    // Both ways it could be turned on are overridden: the environment and the --settings env.
     expect(run.spawn.match(/CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS[=\\":]{1,12}0/g)?.length, run.spawn).toBe(2);
     expect(run.spawn.match(/CLAUDE_CODE_DISABLE_AGENT_VIEW[=\\":]{1,12}1/g)?.length, run.spawn).toBe(2);
     expect(run.spawn).toMatch(/disableAgentView[\\":]{1,12}true/);

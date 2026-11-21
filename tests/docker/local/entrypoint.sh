@@ -1,5 +1,4 @@
 #!/bin/sh
-# Sets up ssh the way the README asks a real local machine to: a key, and a `remote` alias that needs no prompt.
 set -eu
 if [ -f /keys/id_ed25519 ]; then
   install -d -m 700 "$HOME/.ssh"

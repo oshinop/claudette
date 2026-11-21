@@ -1,16 +1,11 @@
-//! The commands claudette runs over ssh, and the remote shell commands it sends.
-
 use std::collections::BTreeMap;
 
 use crate::config::Config;
 
-/// Single-quotes a word for a POSIX shell.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Claude Code's variables, by family (code.claude.com/docs/en/env-vars): a new variable in a
-/// family is forwarded without a change here.
 const FAMILIES: [&str; 6] = ["ANTHROPIC_", "CLAUDE_", "DISABLE_", "ENABLE_", "MCP_", "VERTEX_REGION_"];
 const OUTSIDE_FAMILIES: [&str; 10] = [
     "API_FORCE_IDLE_TIMEOUT",
@@ -25,9 +20,6 @@ const OUTSIDE_FAMILIES: [&str; 10] = [
     "USE_BUILTIN_RIPGREP",
 ];
 
-/// The credentials Claude Code reads from its environment. With CLAUDETTE_FORWARD_CLAUDE_ENV they go
-/// to the remote claude, as a host sets them for its claude (T3 Code's provider variables, the Agent
-/// SDK's `env`); they never appear on the remote command line (see [`claude_command`]).
 const CLAUDE_SECRETS: [&str; 10] = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -41,8 +33,6 @@ const CLAUDE_SECRETS: [&str; 10] = [
     "MCP_CLIENT_SECRET",
 ];
 
-/// Claude Code's variables that name a file or folder on this machine, which the remote claude can't
-/// open. The passphrase goes with its key file.
 const LOCAL_PATHS: [&str; 16] = [
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_CODE_TMPDIR",
@@ -62,8 +52,6 @@ const LOCAL_PATHS: [&str; 16] = [
     "CLAUDE_JOB_DIR",
 ];
 
-/// What a claude on this machine sets for its own children, when claudette runs under one: the
-/// parent session's identity, which is not the remote claude's.
 const SET_BY_CLAUDE: [&str; 8] = [
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
@@ -75,44 +63,27 @@ const SET_BY_CLAUDE: [&str; 8] = [
     "CLAUDE_CODE_MESSAGING_TOKEN",
 ];
 
-/// A credential by its name: a key, token, secret, passphrase or password, or one Claude Code reads.
 pub fn is_credential(name: &str) -> bool {
     ["_KEY", "_TOKEN", "_SECRET", "_PASSPHRASE", "_PASSWORD"].iter().any(|s| name.ends_with(s)) || CLAUDE_SECRETS.contains(&name)
 }
 
-/// Whether a variable means nothing, or the wrong thing, to the remote claude: a path on this
-/// machine, the identity of a claude here, or a credential Claude Code doesn't name (a token for
-/// something else in a family, such as an `MCP_*_TOKEN`). Provider and endpoint settings are not
-/// second-guessed: they go as set.
 pub fn machine_bound(name: &str) -> bool {
     LOCAL_PATHS.contains(&name) || SET_BY_CLAUDE.contains(&name) || (is_credential(name) && !CLAUDE_SECRETS.contains(&name))
 }
 
-/// The variables of this process the remote claude gets: the ones `extra` (CLAUDETTE_FORWARD_ENV)
-/// names, whatever they are, and with `claude_env`, Claude Code's own, its credentials included,
-/// but for the ones bound to this machine.
 pub fn forwarded_env<'a>(env: impl IntoIterator<Item = (String, String)>, extra: &'a [String], claude_env: bool) -> BTreeMap<String, String> {
     let claude_owned = |key: &str| (FAMILIES.iter().any(|f| key.starts_with(f)) || OUTSIDE_FAMILIES.contains(&key) || CLAUDE_SECRETS.contains(&key)) && !machine_bound(key);
     env.into_iter().filter(|(key, _)| extra.iter().any(|e| e == key) || (claude_env && claude_owned(key))).collect()
 }
 
-/// Native installs of claude live in ~/.local/bin, which non-interactive ssh shells often leave off PATH.
 const REMOTE_PATH: &str = r#"PATH="$HOME/.local/bin:$PATH""#;
 
-/// What runs on the remote machine around claude.
 #[derive(Default)]
 pub struct Script {
-    /// Shell lines run before claude (folders, the workspace mount); a failing step exits. They may
-    /// `set --` a launcher (a sandbox) that claude then runs under.
     pub setup: String,
-    /// Run when the command ends, however it ends. Without it claude replaces the shell.
     pub cleanup: String,
 }
 
-/// The shell command that runs claude on the remote machine. claude's environment never goes on this
-/// command line, which anyone on the remote machine can read (`ps`): a session's comes with the run
-/// (the holder sets it, see [`crate::link::Start`]), a plain command's from a private file
-/// ([`env_file`]).
 pub fn claude_command(config: &Config, script: &Script, args: &[String]) -> String {
     let mut run = vec![shell_quote(&config.remote_claude)];
     run.extend(args.iter().map(|a| shell_quote(a)));
@@ -133,8 +104,6 @@ pub fn ssh_argv(config: &Config, command: &str, tty: bool) -> Vec<String> {
     argv
 }
 
-/// What to do when ssh itself failed (exit 255) rather than the remote command: usually a key it may
-/// not prompt for, or a host key not yet accepted.
 pub fn failure_hint(config: &Config, status: std::process::ExitStatus) -> String {
     if status.code() != Some(255) {
         return String::new();
@@ -142,7 +111,6 @@ pub fn failure_hint(config: &Config, status: std::process::ExitStatus) -> String
     format!("\nssh could not connect without a prompt: run `ssh {}` once in a terminal (to accept its host key), and keep the key in an agent", config.host)
 }
 
-/// A socket claude reaches this machine through: the path the remote helper serves, and the socket here.
 pub struct SocketForward {
     pub remote: String,
     pub local: String,
@@ -249,7 +217,6 @@ mod tests {
             ]
         );
         assert!(forwarded_env(env.clone(), &["GITHUB_TOKEN".into()], true).contains_key("GITHUB_TOKEN"));
-        // Turned off, only the named variables go.
         assert_eq!(forwarded_env(env, &["ANTHROPIC_MODEL".into()], false).keys().collect::<Vec<_>>(), ["ANTHROPIC_MODEL"]);
     }
 

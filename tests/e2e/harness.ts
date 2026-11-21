@@ -27,7 +27,6 @@ export type RecordedRequest = {
   reply: { content: { type: string; name?: string; text?: string }[] };
 };
 
-/** Registers a scripted model conversation; the prompt must contain `[[scenario:<id>]]`. */
 export async function scenario(steps: Step[]): Promise<string> {
   const id = `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
   const res = await fetch(`${MOCK_API}/_scenario`, { method: "POST", body: JSON.stringify({ id, steps }) });
@@ -37,12 +36,10 @@ export async function scenario(steps: Step[]): Promise<string> {
 
 export async function modelRequests(id: string): Promise<RecordedRequest[]> {
   const res = await fetch(`${MOCK_API}/_log?scenario=${id}`);
-  // The mock API is this suite's own fixture; its log shape is RecordedRequest by construction.
   const all = (await res.json()) as RecordedRequest[];
   return all.filter((r) => r.step !== null);
 }
 
-/** A fresh git repository on the local machine, with the given files committed. */
 export function project(files: Record<string, string> = {}): string {
   const dir = mkdtempSync(join(homedir(), "proj-"));
   for (const [name, content] of Object.entries(files)) {
@@ -55,7 +52,6 @@ export function project(files: Record<string, string> = {}): string {
   return dir;
 }
 
-/** Streaming input, the way T3 Code and other long-lived hosts feed a session. */
 class Prompts implements AsyncIterable<SDKUserMessage> {
   private queue: SDKUserMessage[] = [];
   private waiting: ((r: IteratorResult<SDKUserMessage>) => void) | undefined;
@@ -93,15 +89,10 @@ export type Session = {
   query: Query;
   messages: SDKMessage[];
   stderr: string[];
-  /** Sends one user turn and waits for its result message. */
   turn(text: string): Promise<Extract<SDKMessage, { type: "result" }>>;
   close(): Promise<void>;
 };
 
-/**
- * Starts a session the way T3 Code's Claude provider does: streaming input, partial messages, a
- * preset system prompt with an append, a permission callback, claudette as the executable.
- */
 export function start(cwd: string, options: Partial<Options> & { canUseTool?: CanUseTool } = {}): Session {
   const prompts = new Prompts();
   const stderr: string[] = [];
@@ -143,7 +134,6 @@ export function start(cwd: string, options: Partial<Options> & { canUseTool?: Ca
   };
 }
 
-/** Every tool_use block the host saw in assistant messages. */
 export function toolUses(messages: SDKMessage[]): { name: string; input: Record<string, unknown> }[] {
   return messages.flatMap((m) =>
     m.type === "assistant"
@@ -156,16 +146,11 @@ export function resultText(result: Extract<SDKMessage, { type: "result" }>): str
   return result.subtype === "success" ? result.result : `ERROR(${result.subtype})`;
 }
 
-/** Runs a shell command on the remote machine over the same ssh setup claudette uses. */
 export function onRemote(command: string): string {
   const proc = Bun.spawnSync(["ssh", "remote", command], { stdout: "pipe", stderr: "pipe" });
   return proc.stdout.toString().trim();
 }
 
-/**
- * The screen as text with escape sequences and whitespace removed: the interface moves the cursor
- * instead of printing spaces, so words arrive run together.
- */
 export const plain = (screen: string) =>
   screen
     .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "")
@@ -174,10 +159,6 @@ export const plain = (screen: string) =>
     .replace(/\x1b[=>78]/g, "")
     .replace(/\s+/g, "");
 
-/**
- * Starts claudette in a pseudo-terminal, accepts the trust prompt if Claude Code shows it, and
- * waits until the screen shows `until`.
- */
 export async function launch(dir: string, args: string[], until: string) {
   let screen = "";
   const decoder = new TextDecoder();
@@ -189,7 +170,6 @@ export async function launch(dir: string, args: string[], until: string) {
   const text = () => plain(screen);
   let trusted = false;
   let lastKey = 0;
-  /** Waits for the screen to show `what`; true when it did. */
   const waitFor = async (what: string, ms = 60_000) => {
     const end = Date.now() + ms;
     while (Date.now() < end && !text().includes(what)) {
@@ -208,7 +188,6 @@ export async function launch(dir: string, args: string[], until: string) {
     return text().includes(what);
   };
   await waitFor(until);
-  /** The exit code, or "timeout". */
   const exited = async (ms = 15_000) => Promise.race([proc.exited, Bun.sleep(ms).then(() => "timeout" as const)]);
   return {
     proc,
@@ -216,13 +195,11 @@ export async function launch(dir: string, args: string[], until: string) {
     waitFor,
     exited,
     write: (keys: string) => proc.terminal!.write(keys),
-    /** Types a line into the interface, as a person does: the text, then Enter. */
     async type(line: string) {
       proc.terminal!.write(line);
       await Bun.sleep(400);
       proc.terminal!.write("\r");
     },
-    /** Ctrl-C twice: Claude Code's own exit. */
     async exit() {
       proc.terminal!.write("\x03");
       await Bun.sleep(300);
@@ -232,7 +209,6 @@ export async function launch(dir: string, args: string[], until: string) {
   };
 }
 
-/** A stdio MCP server for the remote machine, which has node but no MCP SDK. Its `where` tool reports the host and $TOKEN; its `open` tool hands a link to $BROWSER; its `run` tool runs a shell command and returns its output. */
 const REMOTE_SERVER = `const os = require("os"); const { spawnSync } = require("child_process"); let b = "";
 process.stdin.on("data", (d) => { b += d; let i;
   while ((i = b.indexOf("\\n")) >= 0) { const l = b.slice(0, i); b = b.slice(i + 1); if (!l.trim()) continue; const m = JSON.parse(l);
@@ -245,7 +221,6 @@ process.stdin.on("data", (d) => { b += d; let i;
     else if (m.method === "tools/call") text("stdio-server-on:" + os.hostname() + " token:" + (process.env.TOKEN || ""));
     else if (m.id !== undefined) r({}); } });`;
 
-/** Puts the remote machine's MCP server at /tmp/where.cjs on the remote machine and returns that path. */
 export function installRemoteServer(): string {
   onRemote(`cat > /tmp/where.cjs <<'EOF'\n${REMOTE_SERVER}\nEOF`);
   return "/tmp/where.cjs";
@@ -253,7 +228,6 @@ export function installRemoteServer(): string {
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-/** The remote folder claudette uses for a local directory, as `~/…` for onRemote. */
 export function remoteDir(dir: string): string {
   const id = ["/etc/machine-id", "/var/lib/dbus/machine-id"].map((f) => {
     try {
@@ -267,12 +241,10 @@ export function remoteDir(dir: string): string {
   return `~/.claudette/ws/${sha256(`claudette:${id}`).slice(0, 12)}/${name}-${sha256(path).slice(0, 8)}`;
 }
 
-/** The projects folder name Claude Code uses for a local directory (short paths only). */
 export const projectKey = (dir: string) => realpathSync(dir).replace(/[^a-zA-Z0-9]/g, "-");
 
 export type Ask = { toolName: string; input: Record<string, unknown>; suggestions: unknown };
 
-/** A permission callback that records every question and answers with `decide` (allow by default). */
 export function permissions(decide?: (ask: Ask) => PermissionResult) {
   const asked: Ask[] = [];
   const canUseTool: CanUseTool = async (toolName, input, { suggestions }) => {
@@ -283,10 +255,6 @@ export function permissions(decide?: (ask: Ask) => PermissionResult) {
   return { asked, canUseTool };
 }
 
-/**
- * Polls until `check` passes or the timeout ends. The conditions live in other processes (a
- * transcript file, the process table), which offer no event to await.
- */
 export async function until(check: () => boolean, timeoutMs = 10_000): Promise<boolean> {
   const end = Date.now() + timeoutMs;
   while (Date.now() < end) {

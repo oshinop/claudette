@@ -1,7 +1,3 @@
-/**
- * The real T3 Code server, unmodified, with its built-in Claude provider's Binary path set to
- * claudette. Runs in the `t3` container (scripts/test.sh --t3).
- */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -14,11 +10,8 @@ const PORT = "3773";
 const env = { ...process.env, T3CODE_HOME: T3_HOME };
 let server: Subprocess<"ignore", "pipe", "inherit"> | undefined;
 
-/** Starts `t3 serve` and resolves once it prints that it is ready. */
 async function startServer() {
   server = Bun.spawn(["t3", "serve", "--no-browser", "--port", PORT], { env, stdin: "ignore", stdout: "pipe", stderr: "inherit" });
-  // One reader for the server's whole life: breaking out of `for await` would cancel the pipe,
-  // and the server would die of EPIPE on its next log line.
   const reader = server.stdout.getReader();
   const decoder = new TextDecoder();
   let seen = "";
@@ -65,7 +58,6 @@ describe("T3 Code with claudette as the Claude binary", () => {
   const dir = project({ "notes.txt": "t3-local-file\n" });
   let threadId = "";
 
-  // The second test continues the thread this one starts.
   test("a thread's tools run on the local machine, and T3 gets the reply", async () => {
     expect(t3("project", "add", dir).code).toBe(0);
     const id = await scenario([
@@ -99,7 +91,6 @@ describe("T3 Code with claudette as the Claude binary", () => {
     expect(run.json!.status).toBe("completed");
     expect(run.json!.reply).toBe("second turn done");
     const [request] = await modelRequests(id);
-    // The first turn's prompt and tool results are in the resumed conversation.
     expect(JSON.stringify(request!.messages)).toContain("do local things");
     expect(JSON.stringify(request!.messages)).toContain("t3-local-file");
   });

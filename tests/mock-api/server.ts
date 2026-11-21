@@ -1,15 +1,3 @@
-/**
- * A scripted stand-in for the Anthropic Messages API, for the real Claude Code CLI on `remote`.
- *
- * Tests register a scenario (POST /_scenario) and put `[[scenario:<id>]]` in the prompt. The latest
- * user turn carrying a marker picks the scenario; each model request plays the next step, chosen by
- * how many tool results followed that turn. A tool step names a tool by its model-visible name or suffix (`Read`
- * matches `mcp__cc__Read`), so a test fails loudly when the tool the step needs is not offered.
- * Requests without tools, or without a scenario marker (titles, quota checks), get a short text reply.
- *
- * Every /v1/messages request is recorded; GET /_log?scenario=<id> returns them.
- */
-
 type Block = { type: string; text?: string; content?: unknown; name?: string; id?: string; input?: unknown; is_error?: boolean };
 type Message = { role: string; content: string | Block[] };
 type Step = { tool: string; input: Record<string, unknown> } | { text: string };
@@ -40,7 +28,6 @@ function textOf(value: unknown): string {
   return "";
 }
 
-/** The latest user turn that names a scenario, and its position; tool output never counts as a turn. */
 function findScenario(messages: Message[]): { id: string; at: number } | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]!;

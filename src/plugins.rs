@@ -1,26 +1,3 @@
-//! This machine's Claude Code plugins, for the remote claude.
-//!
-//! The session's plugins are the ones Claude Code would load here: installed in this machine's
-//! plugin store (`~/.claude/plugins/installed_plugins.json`, for the user or for this project) or
-//! named in `enabledPlugins`, and on by `enabledPlugins` (user, project and local settings as
-//! `--setting-sources` loads them, the caller's `--settings`, then managed settings, which win), or
-//! by the manifest's `defaultEnabled` (on unless it says `false`) when no setting names them. Each is
-//! served read-only from its folder here (see [`crate::mount::sftp::Plugins`]) and loaded with
-//! `--plugin-dir`, so its skills, agents, commands and output styles come from this machine. The
-//! remote machine's own plugins stay unused.
-//!
-//! A plugin's hooks and MCP servers run here, where your files and credentials are: command hooks
-//! become calls back to this machine, as the settings' hooks do (with `CLAUDE_PLUGIN_ROOT`,
-//! `CLAUDE_PLUGIN_DATA` and `CLAUDE_PLUGIN_OPTION_<KEY>` as Claude Code sets them), and its MCP
-//! servers join the session's servers that run here, named `plugin_<plugin>_<server>` so their
-//! tools keep the names Claude Code gives them (`mcp__plugin_<plugin>_<server>__<tool>`).
-//!
-//! A plugin's options (`userConfig`) are the ones Claude Code saved here: `pluginConfigs` in the
-//! user settings, the caller's `--settings` and managed settings, then the sensitive ones from
-//! Claude Code's credential store (`pluginSecrets`), then each option's default. They fill
-//! `${user_config.KEY}` in the plugin's MCP servers and exec-form hook arguments here; the
-//! remote claude gets only the non-sensitive ones, for the skills and agents it reads.
-
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
@@ -31,29 +8,19 @@ use crate::json::Object;
 use crate::log::warn;
 use crate::settings::{Callbacks, PluginEnv, SETTINGS_FILES, Sources, user_dir};
 
-/// A plugin's manifest, relative to its folder.
 pub const MANIFEST: &str = ".claude-plugin/plugin.json";
-/// A plugin's default MCP server file.
 pub const MCP_FILE: &str = ".mcp.json";
-/// A plugin's default hooks file.
 const HOOKS_FILE: &str = "hooks/hooks.json";
 
 #[derive(Debug, Clone)]
 pub struct Plugin {
-    /// `name@marketplace`, as `enabledPlugins` names it.
     pub id: String,
-    /// The manifest's `name`, which Claude Code names the plugin's MCP servers after.
     pub name: String,
-    /// Its installed folder here, canonical.
     pub root: PathBuf,
-    /// `${CLAUDE_PLUGIN_DATA}` here: `~/.claude/plugins/data/<id>`.
     pub data: PathBuf,
-    /// Its options, every one with a value: (key, value as Claude Code passes it, sensitive).
     pub options: Vec<(String, String, bool)>,
 }
 
-/// `id` with every character other than a letter, digit, `_` or `-` replaced by `-`, as Claude Code
-/// names a plugin's data folder.
 fn sanitize(id: &str) -> String {
     id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' }).collect()
 }
@@ -65,7 +32,6 @@ fn read_object(path: &Path) -> Object {
     }
 }
 
-/// A manifest path (`./config/hooks.json`) as a path inside the plugin, or None if it leaves it.
 fn inside(path: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for component in Path::new(path).components() {
@@ -78,12 +44,10 @@ fn inside(path: &str) -> Option<PathBuf> {
     Some(out)
 }
 
-/// An MCP entry that names a bundle or a URL rather than a JSON file or an inline map.
 fn is_bundle(path: &str) -> bool {
     !path.ends_with(".json")
 }
 
-/// An option's value as Claude Code passes it to a process: `String(value)` in JavaScript.
 fn option_text(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -93,7 +57,6 @@ fn option_text(value: &Value) -> String {
     }
 }
 
-/// `${user_config.KEY}` in `text`, from the plugin's options; an unknown key stays as written.
 pub fn fill_options(text: &str, options: &[(String, String)]) -> String {
     if !text.contains("${user_config.") {
         return text.to_owned();
@@ -102,7 +65,6 @@ pub fn fill_options(text: &str, options: &[(String, String)]) -> String {
 }
 
 impl Plugin {
-    /// Its folder's name in the mount.
     pub fn dir_name(&self) -> String {
         sanitize(&self.id)
     }
@@ -115,8 +77,6 @@ impl Plugin {
         read_object(&self.root.join(MANIFEST))
     }
 
-    /// The files that hold its hooks, relative to its folder: `hooks/hooks.json` and the ones its
-    /// manifest names.
     pub fn hook_files(&self) -> Vec<PathBuf> {
         let mut files = vec![PathBuf::from(HOOKS_FILE)];
         let named = match self.manifest().get("hooks") {
@@ -128,8 +88,6 @@ impl Plugin {
         files
     }
 
-    /// Its MCP servers by name: `.mcp.json`, then what the manifest declares (JSON files and inline
-    /// maps, in order; a later name replaces an earlier one). Bundles and URLs stay with the plugin.
     fn servers(&self) -> Object {
         let file = |path: &Path| {
             let mut object = read_object(&self.root.join(path));
@@ -153,8 +111,6 @@ impl Plugin {
         servers
     }
 
-    /// The manifest as the remote claude reads it: inline hooks call back, and the MCP servers it
-    /// declares are gone (they run here).
     pub fn manifest_view(&self, callbacks: &Callbacks) -> Vec<u8> {
         let Ok(bytes) = std::fs::read(self.root.join(MANIFEST)) else { return Vec::new() };
         let Ok(Value::Object(mut manifest)) = serde_json::from_slice::<Value>(&bytes) else { return bytes };
@@ -187,8 +143,6 @@ impl Plugin {
     }
 }
 
-/// Claude Code's managed settings files: `managed-settings.json`, then `managed-settings.d/*.json`
-/// in name order.
 fn managed_settings() -> Vec<Object> {
     let dir = if cfg!(target_os = "macos") { Path::new("/Library/Application Support/ClaudeCode") } else { Path::new("/etc/claude-code") };
     let mut files = vec![dir.join("managed-settings.json")];
@@ -200,8 +154,6 @@ fn managed_settings() -> Vec<Object> {
     files.iter().map(|f| read_object(f)).filter(|o| !o.is_empty()).collect()
 }
 
-/// The settings that decide plugins, lowest precedence first, each with whether it may hold
-/// options (Claude Code reads `pluginConfigs` from the user's, `--settings` and managed ones).
 fn settings_layers(cwd: &Path, p: &ParsedArgs) -> Vec<(Object, bool)> {
     let sources = Sources::of(p);
     let mut layers = vec![];
@@ -218,7 +170,6 @@ fn settings_layers(cwd: &Path, p: &ParsedArgs) -> Vec<(Object, bool)> {
     layers
 }
 
-/// The installations of a plugin that apply here: the user's, and this project's.
 fn installations<'a>(registry: &'a Object, id: &str, project: &Path) -> Vec<&'a Object> {
     let entries: Vec<&Object> = match registry.get("plugins").and_then(|p| p.get(id)) {
         Some(Value::Array(items)) => items.iter().filter_map(Value::as_object).collect(),
@@ -234,15 +185,12 @@ fn installations<'a>(registry: &'a Object, id: &str, project: &Path) -> Vec<&'a 
         .collect()
 }
 
-/// Where a plugin is installed: this project's installation when there is one, else the user's.
 fn install_path(registry: &Object, id: &str, project: &Path) -> Option<PathBuf> {
     let found = installations(registry, id, project);
     let chosen = found.iter().find(|e| e.get("projectPath").is_some()).or_else(|| found.first())?;
     chosen.get("installPath").and_then(Value::as_str).map(PathBuf::from)
 }
 
-/// Claude Code's credential store on this machine, as JSON: the Keychain entry on macOS (when the
-/// Claude Code folder is the default one), else `.credentials.json` in it.
 fn credentials() -> Object {
     if cfg!(target_os = "macos") && std::env::var_os("CLAUDE_CONFIG_DIR").is_none_or(|v| v.is_empty()) {
         let user = std::env::var("USER").unwrap_or_default();
@@ -257,9 +205,6 @@ fn credentials() -> Object {
     read_object(&user_dir().join(".credentials.json"))
 }
 
-/// A plugin's options from what Claude Code saved: (key, value, sensitive) for each declared
-/// option that has a value or a default. The credential store is read once, and only for a plugin
-/// with a sensitive option.
 fn options(id: &str, manifest: &Object, layers: &[(Object, bool)], secrets: &mut Option<Object>) -> Vec<(String, String, bool)> {
     let Some(Value::Object(declared)) = manifest.get("userConfig") else { return vec![] };
     let mut saved = Object::new();
@@ -284,7 +229,6 @@ fn options(id: &str, manifest: &Object, layers: &[(Object, bool)], secrets: &mut
         .collect()
 }
 
-/// The plugins the session gets: on by the settings or by default, and installed here.
 pub fn enabled(cwd: &Path, p: &ParsedArgs) -> Vec<Plugin> {
     let plugins_dir = user_dir().join("plugins");
     let registry = read_object(&plugins_dir.join("installed_plugins.json"));
@@ -324,8 +268,6 @@ pub fn enabled(cwd: &Path, p: &ParsedArgs) -> Vec<Plugin> {
         .collect()
 }
 
-/// The plugin's placeholders in every string: `${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`,
-/// `${CLAUDE_PROJECT_DIR}` and `${user_config.KEY}`.
 fn place(value: &mut Value, plugin: &PluginEnv, project: &str) {
     match value {
         Value::String(s) if s.contains("${") => {
@@ -338,8 +280,6 @@ fn place(value: &mut Value, plugin: &PluginEnv, project: &str) {
     }
 }
 
-/// Adds the plugins' MCP servers to the ones that run here, beside the caller's own (which win).
-/// With `--strict-mcp-config`, none are added, as Claude Code starts no plugin servers then.
 pub fn add_servers(p: &mut ParsedArgs, plugins: &[Plugin], cwd: &Path) {
     if p.strict_mcp {
         return;
@@ -360,9 +300,6 @@ pub fn add_servers(p: &mut ParsedArgs, plugins: &[Plugin], cwd: &Path) {
     }
 }
 
-/// The non-sensitive options as `--settings` gives them to the remote claude (`pluginConfigs`),
-/// under the ids it gives `--plugin-dir` plugins (`<name>@inline`), for the skills and agents it
-/// reads.
 pub fn remote_options(plugins: &[Plugin]) -> Object {
     plugins
         .iter()
@@ -415,7 +352,6 @@ mod tests {
         assert_eq!(view["hooks"][0], "./extra/hooks.json");
         assert!(view["hooks"][1]["Stop"][0]["hooks"][0]["command"].as_str().unwrap().contains(" -U "));
 
-        // The remote claude gets the non-sensitive options only, under the id it gives the plugin.
         assert_eq!(Value::Object(remote_options(std::slice::from_ref(&p))), json!({ "lint@inline": { "options": { "level": "2" } } }));
         std::fs::remove_dir_all(&p.root).unwrap();
     }

@@ -1,22 +1,3 @@
-//! `__helper sftp <socket> <warm file> [--writeback]`: the remote end of one of this machine's mounts.
-//! sshfs speaks SFTP to it instead of to a plain relay to the forwarded socket, and it answers what it
-//! already knows without a round trip to the laptop. On a slow link every round trip is claude
-//! waiting, one after another.
-//!
-//! - **Warm start.** What claude reads first from the mount comes with the run's first frames (see
-//!   [`crate::mount::warm`]): the server's greeting, listings, attributes and small files. The mount
-//!   comes up, and claude starts, without waiting on the laptop.
-//! - **A short-lived cache.** Attributes and complete listings, warm or fetched, answer lookups for
-//!   [`TTL`], as sshfs's own cache (off under this one) did for longer; a complete listing also says
-//!   which names are not there. Whatever a change made through the mount touches is dropped.
-//! - **Write-behind** (`--writeback`, the sessions folder). A transcript is written by the claude whose
-//!   session it is and nobody else. The near end keeps a copy of each one claude writes, as the laptop
-//!   has it (the same [`LineWriter`] turns the remote paths into the laptop's), and answers claude's
-//!   opens, writes, reads and lookups of it at once. Every write still leaves for the laptop as it is
-//!   made, in order, under a handle the near end chose ([`OPEN_AS`]), so a hook there that reads the
-//!   transcript finds it written; the laptop's answers are only checked. Once sshfs has gone, the near
-//!   end waits for the last of them before it exits, and the session's end waits for the near end.
-
 use std::collections::{HashMap, VecDeque};
 use std::io::{Cursor, IsTerminal};
 use std::sync::Arc;
@@ -33,25 +14,15 @@ use crate::mount::sftp::{LineWriter, OPEN_AS, OpenAs, next_batch};
 use crate::mount::warm::Warm;
 use crate::mount::workdir::PathMap;
 
-/// How long what the near end learned stands for the laptop's answer. sshfs's own cache, which this
-/// one replaces, kept attributes and listings for 20 s; the kernel keeps absent names for 10 s.
 const TTL: Duration = Duration::from_secs(10);
-/// How long the near end waits, once sshfs has gone, for the laptop to confirm the writes it sent.
 const DRAIN: Duration = Duration::from_secs(10);
-/// A transcript claude opens to write that the near end does not keep yet is fetched whole first, in
-/// reads of this size sent together, up to [`FETCH_MAX`] (what a warm start may carry); a larger one
-/// is written through, a round trip at a time.
 const FETCH_CHUNK: u32 = 1 << 20;
 const FETCH_MAX: u64 = 8 << 20;
-/// Bytes waiting to leave for the laptop past which sshfs's requests wait too: while the link is
-/// down, writes answered at once would otherwise pile up without end.
 const QUEUE_MAX: usize = 16 << 20;
-/// Largest packet taken from either side.
 const MAX_PACKET: u32 = 4 << 20;
 
 const SSH_FXP_VERSION: u8 = 2;
 
-/// A path as the servers resolve it: absolute, `.` dropped, `..` stopping at the root.
 fn norm(path: &str) -> String {
     let mut parts: Vec<&str> = vec![];
     for part in path.split('/') {
@@ -66,7 +37,6 @@ fn norm(path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-/// A normalized path's folder and name; `None` for the root.
 fn split(path: &str) -> Option<(&str, &str)> {
     if path == "/" {
         return None;
@@ -75,7 +45,6 @@ fn split(path: &str) -> Option<(&str, &str)> {
     Some((if at == 0 { "/" } else { &path[..at] }, &path[at + 1..]))
 }
 
-/// The files the near end writes behind: Claude Code's transcripts.
 fn is_transcript(path: &str) -> bool {
     path.ends_with(".jsonl")
 }
@@ -84,7 +53,6 @@ fn unix_now() -> u32 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as u32).unwrap_or(0)
 }
 
-/// A request or reply (type, id, payload) with another id, length-prefixed for the wire.
 fn with_id(raw: &Bytes, id: u32) -> Bytes {
     let mut out = BytesMut::with_capacity(raw.len() + 4);
     out.put_u32(raw.len() as u32);
@@ -98,7 +66,6 @@ fn is_ok(packet: &Option<Packet>) -> bool {
     matches!(packet, Some(Packet::Status(s)) if s.status_code == StatusCode::Ok)
 }
 
-/// The code of a status answer; anything else is a failure.
 fn status_of(packet: &Option<Packet>) -> StatusCode {
     match packet {
         Some(Packet::Status(s)) => s.status_code,
@@ -123,15 +90,12 @@ impl<T> Fresh<T> {
 
 #[derive(Default)]
 struct Cache {
-    /// lstat answers; `None`: no such file.
     attrs: HashMap<String, Fresh<Option<FileAttributes>>>,
-    /// Complete listings, with lstat attributes.
     listings: HashMap<String, Fresh<Vec<File>>>,
     contents: HashMap<String, Fresh<Bytes>>,
 }
 
 impl Cache {
-    /// What lstat says of `path`, when known: `Some(None)` when it does not exist.
     fn lookup(&self, path: &str) -> Option<Option<FileAttributes>> {
         if let Some(attrs) = self.attrs.get(path).and_then(Fresh::get) {
             return Some(attrs.clone());
@@ -153,7 +117,6 @@ impl Cache {
         self.listing(path).is_some() || self.lookup(path).flatten().is_some_and(|a| a.is_dir())
     }
 
-    /// Drops what a change to `path` makes stale: it, and its folder's attributes and listing.
     fn forget(&mut self, path: &str) {
         self.attrs.remove(path);
         self.contents.remove(path);
@@ -164,7 +127,6 @@ impl Cache {
         }
     }
 
-    /// Also everything below `path`, a folder renamed or removed.
     fn forget_below(&mut self, path: &str) {
         self.forget(path);
         let prefix = format!("{}/", path.trim_end_matches('/'));
@@ -174,7 +136,6 @@ impl Cache {
     }
 }
 
-/// A transcript the near end keeps: its bytes as the laptop has them.
 struct Kept {
     data: Vec<u8>,
     attrs: FileAttributes,
@@ -198,24 +159,18 @@ impl Kept {
     }
 }
 
-/// A handle the near end answers for itself.
 enum Local {
     Dir(Vec<File>),
-    /// A cached file's contents as they were when it was opened.
     Snapshot { data: Bytes, attrs: FileAttributes },
-    /// A kept transcript; `lines` when opened to write, then the laptop has it open under the same
-    /// handle. `failed`: the laptop refused one of its writes, which the next one reports.
     Kept { path: String, lines: Option<LineWriter>, failed: Option<StatusCode> },
 }
 
-/// What a change does to the kept transcripts once the laptop has made it.
 enum KeptChange {
     None,
     Remove(String),
     Rename(String, String),
 }
 
-/// What to do with the laptop's answer to a request.
 enum Then {
     Pass,
     Lstat(String),
@@ -225,46 +180,34 @@ enum Then {
     Close(String),
     Changed { forget: Vec<String>, below: bool, kept: KeptChange },
     MadeDir(String),
-    /// A write-behind request of this handle: its answer is only checked.
     Behind(String),
-    /// The laptop's open of a kept transcript, under this handle: refused, the copy is dropped.
     OpenedBehind { handle: String, path: String },
     FetchOpen(String),
-    /// A read of the fetch's handle, at this offset.
     FetchRead(String, u64),
 }
 
 struct Pending {
-    /// The id sshfs gave the request, when the answer is for sshfs.
     client: Option<u32>,
     then: Then,
-    /// [`Near::epoch`] when the request left: an answer from before a change is not cached.
     epoch: u64,
 }
 
-/// A transcript being fetched before claude's open of it is answered. sshfs's later requests wait.
 struct Fetch {
     path: String,
     handle: String,
     attrs: FileAttributes,
     data: Vec<u8>,
-    /// Where the next read starts, and how many reads are unanswered.
     next: u64,
     waiting: usize,
-    /// claude's open: its id, flags and attributes, and the request itself.
     open: (u32, OpenFlags, FileAttributes, Bytes),
 }
 
-/// What a request on a handle comes to.
 enum Act {
-    /// Answered here; the request also goes to the laptop, whose answer is only checked.
     Behind,
     Answer(StatusCode),
-    /// A handle of the laptop's: the request goes there; the path it changes, if known.
     Through(Option<String>),
 }
 
-/// What waits to leave for the laptop, in bytes, and a wake-up each time some of it has left.
 #[derive(Default)]
 struct Queue {
     bytes: AtomicUsize,
@@ -272,27 +215,20 @@ struct Queue {
 }
 
 struct Near {
-    /// Set when writing transcripts behind: how the laptop maps their lines.
     writeback: Option<PathMap>,
     cache: Cache,
     kept: HashMap<String, Kept>,
     local: HashMap<String, Local>,
-    /// The laptop's folder handles being read through: path, entries so far, epoch at opening.
     remote_dirs: HashMap<String, (String, Vec<File>, u64)>,
-    /// The laptop's file handles: path, and whether opened to write.
     remote_files: HashMap<String, (String, bool)>,
     pending: HashMap<u32, Pending>,
     next_id: u32,
     next_handle: u64,
-    /// Bumped by every change made through the mount.
     epoch: u64,
     version: Option<(u32, HashMap<String, String>)>,
-    /// sshfs's INIT, until the laptop's VERSION answers it.
     client_waits: bool,
     fetch: Option<Fetch>,
     deferred: VecDeque<Bytes>,
-    /// The first failure of a write behind: said at once, or at the end on a terminal, which claude's
-    /// interface owns until then.
     warning: Option<String>,
     to_client: mpsc::UnboundedSender<Bytes>,
     to_server: mpsc::UnboundedSender<Bytes>,
@@ -311,7 +247,6 @@ impl Near {
         }
         let mut kept = HashMap::new();
         for (path, data) in warm.contents {
-            // A transcript sent whole (one being resumed) is kept from the start.
             match cache.lookup(&path) {
                 Some(Some(attrs)) if writeback.is_some() && is_transcript(&path) => {
                     kept.insert(path, Kept { data, attrs });
@@ -341,19 +276,16 @@ impl Near {
             to_server,
             queue,
         };
-        // The laptop's server is greeted at once; its answer is only needed without a warm start.
         if let Ok(init) = Bytes::try_from(Packet::Init(Init { version: 3, extensions: HashMap::new() })) {
             near.send_server(init);
         }
         near
     }
 
-    /// Nothing is waiting on the laptop.
     fn idle(&self) -> bool {
         self.pending.is_empty() && self.fetch.is_none()
     }
 
-    /// Too much waits to leave for the laptop: sshfs's next requests wait with it.
     fn congested(&self) -> bool {
         self.queue.bytes.load(Ordering::Relaxed) > QUEUE_MAX
     }
@@ -373,7 +305,6 @@ impl Near {
         }
     }
 
-    /// Writes sent behind that the laptop has not confirmed.
     fn behind(&self) -> bool {
         self.pending.values().any(|p| matches!(p.then, Then::Behind(_)))
     }
@@ -394,13 +325,11 @@ impl Near {
         self.next_id
     }
 
-    /// Sends one of sshfs's requests on; the answer goes back to sshfs when `client` is its id.
     fn forward(&mut self, client: Option<u32>, raw: &Bytes, then: Then) {
         let id = self.take_id(client, then);
         self.send_server(with_id(raw, id));
     }
 
-    /// Sends a request of the near end's own.
     fn send_own(&mut self, then: Then, packet: impl FnOnce(u32) -> Packet) {
         let id = self.take_id(None, then);
         if let Ok(bytes) = Bytes::try_from(packet(id)) {
@@ -410,7 +339,6 @@ impl Near {
 
     fn new_handle(&mut self) -> String {
         self.next_handle += 1;
-        // Never a digit first: the laptop's own handles are numbers.
         format!("n{}", self.next_handle)
     }
 
@@ -456,7 +384,6 @@ impl Near {
             Packet::RealPath(r) => self.forward(Some(r.id), &raw, Then::Pass),
             Packet::ReadLink(r) => self.forward(Some(r.id), &raw, Then::Pass),
             Packet::Extended(r) => {
-                // An extension may change anything.
                 self.epoch += 1;
                 self.cache = Cache::default();
                 self.forward(Some(r.id), &raw, Then::Pass);
@@ -465,7 +392,6 @@ impl Near {
         }
     }
 
-    /// A request this end does not read: passed on, and nothing cached is trusted any more.
     fn unknown(&mut self, raw: &Bytes) {
         if raw.len() < 5 {
             return;
@@ -499,7 +425,6 @@ impl Near {
             return self.reply(Packet::Attrs(Attrs { id, attrs: kept.attrs() }));
         }
         match self.cache.lookup(&path) {
-            // What a symlink leads to is the laptop's to say.
             Some(Some(attrs)) if !attrs.is_symlink() => self.reply(Packet::Attrs(Attrs { id, attrs })),
             Some(None) => self.status(id, StatusCode::NoSuchFile),
             _ => self.forward(Some(id), raw, Then::Pass),
@@ -581,8 +506,6 @@ impl Near {
         self.forward(Some(id), raw, Then::Open { path, writes: true });
     }
 
-    /// An open of a transcript to write, or of one kept: kept from now on when what the laptop has
-    /// is known (new, cut to nothing, or fetched first).
     fn open_kept(&mut self, id: u32, path: String, pflags: OpenFlags, attrs: FileAttributes, raw: &Bytes) {
         let exclusive = pflags.contains(OpenFlags::CREATE | OpenFlags::EXCLUDE);
         if self.kept.contains_key(&path) {
@@ -637,7 +560,6 @@ impl Near {
             return self.write_through(id, path, raw);
         };
         self.send_own(Then::FetchOpen(handle.clone()), |id| Packet::Extended(Extended { id, request: OPEN_AS.into(), data: request.to_vec() }));
-        // The whole file at once, and a read past its end that says where it ends.
         let reads = existing.len() / u64::from(FETCH_CHUNK) + 1;
         self.fetch = Some(Fetch { path, handle, attrs: existing, data: vec![], next: 0, waiting: 0, open: (id, pflags, attrs, raw.clone()) });
         self.fetch_more(reads);
@@ -645,7 +567,6 @@ impl Near {
 
     fn fetch_more(&mut self, reads: u64) {
         for _ in 0..reads {
-            // Up to a read at FETCH_MAX itself, which finds the end of a file that size.
             let Some(fetch) = self.fetch.as_mut().filter(|f| f.next <= FETCH_MAX) else { return };
             let (handle, offset) = (fetch.handle.clone(), fetch.next);
             fetch.next += u64::from(FETCH_CHUNK);
@@ -658,7 +579,6 @@ impl Near {
         self.fetch.as_ref().is_some_and(|f| f.handle == handle)
     }
 
-    /// A read of the fetch answered. Answers come in the order the reads went.
     fn fetched(&mut self, offset: u64, packet: Option<Packet>) {
         let Some(fetch) = self.fetch.as_mut() else { return };
         fetch.waiting -= 1;
@@ -668,7 +588,6 @@ impl Near {
                 chunk.data.len() < FETCH_CHUNK as usize
             }
             Some(Packet::Status(s)) if s.status_code == StatusCode::Eof && offset >= fetch.data.len() as u64 => true,
-            // An error, or the file changed under the reads.
             _ => return self.end_fetch(false),
         };
         if fetch.waiting > 0 {
@@ -679,7 +598,6 @@ impl Near {
         } else if fetch.next > FETCH_MAX {
             self.end_fetch(false);
         } else {
-            // It grew since it was listed.
             self.fetch_more(1);
         }
     }
@@ -752,7 +670,6 @@ impl Near {
                         kept.touch();
                     }
                 }
-                // The laptop closes it too, whatever came of its writes.
                 self.forward(None, raw, Then::Behind(handle));
                 return self.status(id, failed.unwrap_or(StatusCode::Ok));
             }
@@ -778,7 +695,6 @@ impl Near {
                 Act::Behind
             }
             Some(Local::Kept { failed: Some(code), .. }) => Act::Answer(*code),
-            // Open to read only: a size cannot change, and times are let be, as the laptop does.
             Some(Local::Kept { lines: None, .. }) if attrs.size.is_none() => Act::Answer(StatusCode::Ok),
             Some(_) => Act::Answer(StatusCode::PermissionDenied),
         };
@@ -803,7 +719,6 @@ impl Near {
 
     fn setstat(&mut self, id: u32, path: String, attrs: &FileAttributes, raw: &Bytes) {
         let Some(kept) = self.kept.get_mut(&path) else { return self.change(id, raw, vec![path], false, KeptChange::None) };
-        // A kept transcript's: applied to the copy, and by the laptop after the writes sent before it.
         if let Some(size) = attrs.size {
             kept.data.resize(usize::try_from(size).unwrap_or(usize::MAX), 0);
             kept.touch();
@@ -926,7 +841,6 @@ impl Near {
             }
             Then::MadeDir(path) => {
                 self.forget(&path);
-                // A folder just made is empty: what is made in it can be kept without asking.
                 if is_ok(&packet) {
                     self.cache.listings.insert(path, Fresh::new(vec![]));
                 }
@@ -942,8 +856,6 @@ impl Near {
             }
             Then::OpenedBehind { handle, path } => {
                 if !is_ok(&packet) {
-                    // The laptop has no such transcript, so this end keeps none: what claude asks of
-                    // it next goes to the laptop, and the handle answers with the laptop's refusal.
                     let code = status_of(&packet);
                     self.kept.remove(&path);
                     self.forget(&path);
@@ -970,7 +882,6 @@ impl Near {
     }
 }
 
-/// Reads length-prefixed packets (without the length) until the stream ends.
 async fn read_packets(mut input: impl AsyncRead + Unpin, packets: mpsc::UnboundedSender<Bytes>) {
     loop {
         let Ok(len) = input.read_u32().await else { return };
@@ -984,7 +895,6 @@ async fn read_packets(mut input: impl AsyncRead + Unpin, packets: mpsc::Unbounde
     }
 }
 
-/// Writes packets as they come; what was counted in `queue` is taken off once written.
 async fn write_packets(mut output: impl AsyncWrite + Unpin, mut packets: mpsc::UnboundedReceiver<Bytes>, queue: Option<Arc<Queue>>) {
     while let Some(first) = packets.recv().await {
         let mut written = first.len();
@@ -1009,16 +919,11 @@ pub async fn serve(args: &[String]) -> i32 {
         return 2;
     };
     let writeback = args[2..].iter().any(|a| a == "--writeback");
-    // A warm start that is missing or damaged only costs round trips.
     let warm = std::fs::read(warm_file).ok().and_then(|bytes| Warm::decode(&bytes)).unwrap_or_default();
-    // While this end runs, its warm start is `<file>.held`; the session's end waits for it to go,
-    // when nothing more will be sent.
     let held = format!("{warm_file}.held");
     let _ = std::fs::rename(warm_file, &held);
     let code = relay(socket, warm, writeback).await;
     let _ = std::fs::remove_file(held);
-    // At once: the runtime would wait for its read of sshfs's stdin, which a stopped session may
-    // never close, and sshfs would wait with it.
     std::process::exit(code)
 }
 
@@ -1042,21 +947,13 @@ async fn relay(socket: &str, warm: Warm, writeback: bool) -> i32 {
     tokio::spawn(read_packets(server_read, packets));
 
     let mut near = Near::new(warm, writeback, to_client, to_server, queue.clone());
-    // The session's process group is signalled when it is stopped. On a TERM (the holder ending a
-    // session nobody came back for, or a host stopping claude) this end goes at once, as the plain
-    // relay did, once the socket has taken what claude was told is written: the mount breaks, so
-    // claude's last writes fail instead of waiting on a laptop that may not be there. An interrupt
-    // or a hangup is for claude, which still writes its transcript's last lines: this end carries
-    // on until sshfs goes.
     use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup())) else { return 1 };
     let mut until: Option<tokio::time::Instant> = None;
     let terminated = loop {
         tokio::select! {
-            // While too much waits for the laptop (a link that is down), sshfs waits too.
             packet = from_client.recv(), if until.is_none() && !near.congested() => match packet {
                 Some(packet) => near.from_client(packet),
-                // sshfs has gone: what was sent behind is waited for.
                 None => until = Some(tokio::time::Instant::now() + DRAIN),
             },
             () = queue.drained.notified(), if near.congested() => {}
@@ -1100,7 +997,6 @@ mod tests {
 
     const APPEND: OpenFlags = OpenFlags::WRITE.union(OpenFlags::CREATE).union(OpenFlags::APPEND);
 
-    /// A near end in front of a real server, on an in-memory connection.
     struct Rig {
         near: Near,
         client: mpsc::UnboundedReceiver<Bytes>,
@@ -1118,7 +1014,6 @@ mod tests {
             Rig { near: Near::new(warm, writeback, to_client, to_server, Arc::default()), client, server, conn, next: 100 }
         }
 
-        /// Sends sshfs's request; returns its id and how many requests it sent to the laptop.
         fn ask(&mut self, packet: impl FnOnce(u32) -> Packet) -> (u32, usize) {
             self.next += 1;
             let mut raw = Bytes::try_from(packet(self.next)).unwrap();
@@ -1128,7 +1023,6 @@ mod tests {
             (self.next, self.server.len() - before)
         }
 
-        /// Carries requests to the server and its answers back until nothing is waiting.
         async fn settle(&mut self) {
             loop {
                 while let Ok(bytes) = self.server.try_recv() {
@@ -1140,12 +1034,10 @@ mod tests {
                 let len = self.conn.read_u32().await.unwrap();
                 let mut packet = vec![0u8; len as usize];
                 self.conn.read_exact(&mut packet).await.unwrap();
-                // The greeting's answer, then everything else.
                 self.near.from_server(Bytes::from(packet));
             }
         }
 
-        /// The answers sshfs has now, decoded.
         fn answers(&mut self) -> Vec<Packet> {
             let mut out = vec![];
             while let Ok(mut bytes) = self.client.try_recv() {
@@ -1155,7 +1047,6 @@ mod tests {
             out
         }
 
-        /// The one answer sshfs has now.
         fn answer(&mut self) -> Packet {
             let mut answers = self.answers();
             assert_eq!(answers.len(), 1, "{answers:?}");
@@ -1201,13 +1092,11 @@ mod tests {
         let line = format!("{{\"cwd\":\"{remote}\",\"file\":\"{remote}/src/a.rs\"}}\n");
         let mapped = "{\"cwd\":\"/Users/me/app\",\"file\":\"/Users/me/app/src/a.rs\"}\n";
 
-        // The greeting, the lookup of a new transcript: answered here, nothing asked.
         rig.ask(|_| Packet::Init(Init { version: 3, extensions: HashMap::new() }));
         assert!(matches!(rig.answer(), Packet::Version(_)));
         let (_, sent) = rig.ask(|id| Packet::Lstat(Lstat { id, path: "/s.jsonl".into() }));
         assert_eq!((code(rig.answer()), sent), (StatusCode::NoSuchFile, 0));
 
-        // Its creation, writes and close are answered at once and sent behind.
         let mut behind = 0;
         let (_, sent) = rig.ask(|id| Packet::Open(Open { id, filename: "/s.jsonl".into(), pflags: APPEND, attrs: FileAttributes::empty() }));
         behind += sent;
@@ -1225,7 +1114,6 @@ mod tests {
         assert_eq!(code(rig.answer()), StatusCode::Ok);
         assert_eq!(behind, 4, "the open, two writes and the close");
 
-        // Read back here, as the laptop will have it.
         rig.ask(|id| Packet::Open(Open { id, filename: "/s.jsonl".into(), pflags: OpenFlags::READ, attrs: FileAttributes::empty() }));
         let r = handle(rig.answer());
         let (_, sent) = rig.ask(|id| Packet::Read(Read { id, handle: r, offset: 0, len: 4096 }));
@@ -1236,7 +1124,6 @@ mod tests {
         assert!(rig.answers().is_empty(), "the laptop's answers to writes behind are not passed on");
         assert_eq!(std::fs::read_to_string(root.join("s.jsonl")).unwrap(), mapped);
 
-        // A transcript the laptop has (being resumed): fetched first, then kept.
         rig.ask(|id| Packet::Open(Open { id, filename: "/old.jsonl".into(), pflags: APPEND, attrs: FileAttributes::empty() }));
         assert!(rig.answers().is_empty(), "the open waits for the fetch");
         rig.settle().await;
@@ -1260,7 +1147,6 @@ mod tests {
         let mut rig = Rig::new(warm, false, server);
         rig.settle().await;
 
-        // Warm: the memory file's contents, and names absent from a listing.
         let (_, sent) = rig.ask(|id| Packet::Open(Open { id, filename: "/memory/MEMORY.md".into(), pflags: OpenFlags::READ, attrs: FileAttributes::empty() }));
         let h = handle(rig.answer());
         rig.ask(|id| Packet::Read(Read { id, handle: h, offset: 0, len: 100 }));
@@ -1268,7 +1154,6 @@ mod tests {
         let (_, sent2) = rig.ask(|id| Packet::Lstat(Lstat { id, path: "/memory/other.md".into() }));
         assert_eq!((code(rig.answer()), sent + sent2), (StatusCode::NoSuchFile, 0));
 
-        // Not warm: asked once, then known.
         std::fs::create_dir(root.join("sub")).unwrap();
         std::fs::write(root.join("sub/x"), "x").unwrap();
         let (_, sent) = rig.ask(|id| Packet::Lstat(Lstat { id, path: "/sub/x".into() }));
@@ -1279,7 +1164,6 @@ mod tests {
         assert_eq!(sent, 0);
         rig.answers();
 
-        // A change through the mount: what it touches is asked again.
         rig.ask(|id| Packet::SetStat(SetStat { id, path: "/sub/x".into(), attrs: FileAttributes { size: Some(0), ..FileAttributes::default() } }));
         rig.settle().await;
         assert_eq!(code(rig.answer()), StatusCode::Ok);
@@ -1296,13 +1180,11 @@ mod tests {
         let warm = warm_of(&mut server);
         let mut rig = Rig::new(warm, true, server);
         rig.settle().await;
-        // The folder goes on the laptop after the warm start said it was there.
         std::fs::remove_dir_all(root.join("memory")).unwrap();
         rig.ask(|id| Packet::Open(Open { id, filename: "/memory/s.jsonl".into(), pflags: APPEND, attrs: FileAttributes::empty() }));
         let h = handle(rig.answer());
         rig.settle().await;
 
-        // The handle answers with the laptop's refusal, and the transcript is the laptop's to show.
         rig.ask(|id| Packet::Write(Write { id, handle: h, offset: 0, data: b"{}\n".to_vec() }));
         assert_ne!(code(rig.answer()), StatusCode::Ok);
         rig.ask(|id| Packet::Lstat(Lstat { id, path: "/memory/s.jsonl".into() }));
@@ -1317,7 +1199,6 @@ mod tests {
         let lines = |from: usize, to: usize| (from..to).map(|i| format!("{{\"n\":{i}}}\n")).collect::<String>();
         std::fs::write(root.join("old.jsonl"), lines(0, 300_000)).unwrap();
         let warm = warm_of(&mut server);
-        // Longer than the warm start says, by more than a read.
         let mut file = std::fs::OpenOptions::new().append(true).open(root.join("old.jsonl")).unwrap();
         std::io::Write::write_all(&mut file, lines(300_000, 400_000).as_bytes()).unwrap();
         let mut rig = Rig::new(warm, true, server);

@@ -1,7 +1,3 @@
-//! The SDK path: an Agent SDK host on our stdio (`--input-format stream-json --output-format
-//! stream-json`), its lines relayed to and from the remote claude by [`crate::relay`], which serves
-//! the local tools over the SDK's control channel.
-
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -28,7 +24,6 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
     let ws = Arc::new(Workspace::new(cwd.to_path_buf(), args.add_dirs.clone(), path_rules));
     let env_prompt = tokio::spawn(prompt::environment_prompt(cwd.to_path_buf(), args.add_dirs.clone())).map(Result::unwrap_or_default).boxed().shared();
 
-    // The local CLAUDE.md files arrive in the environment prompt; the remote machine's stay out.
     let mut env = forwarded_env(std::env::vars(), &config.forward_env, config.forward_claude_env);
     env.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), "1".into());
     env.insert(settings::AGENT_TEAMS.into(), "0".into());
@@ -40,8 +35,6 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
     peers::register(agent.clone());
     hub.serve_agent(agent.clone())?;
     let mut delivered = deliver(&hub, &mut forwards, &mut args, &ws, config)?;
-    // Servers that run here reach claude as SDK servers through the relay; remote ones it starts
-    // itself, and so the inbox relay, which has to be a process of claude's own.
     let mut remote_servers = args.remote_servers.clone();
     remote_servers.insert(helper::INBOX_SERVER.into(), helper::inbox_server(&forwards.run));
     let mcp_config = Some(forwards.file("mcp.json", serde_json::json!({ "mcpServers": remote_servers }).to_string().into_bytes()));
@@ -50,8 +43,6 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
     let append_system_prompt_file = (!args.append_system_prompt.is_empty())
         .then(|| forwards.file("append-prompt.md", args.append_system_prompt.join("\n\n").into_bytes()));
     let extras = RemoteExtras {
-        // claude writes its transcripts into this machine's sessions folder through the mount; a host
-        // with its own session store still gets the mirror frames it asked for.
         mirror: args.host_mirror,
         mcp_config,
         settings_file,
@@ -65,10 +56,8 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
         sockets: tunnel::socket_pairs(&forwards),
         files: std::mem::take(&mut forwards.files),
         pty: None,
-        // claude's environment travels with the run, never on the remote command line.
         env: env.into_iter().map(|(k, v)| (k, serde_json::Value::String(v))).collect(),
     };
-    // The frame log (this machine's, opt-in) records what the command line no longer carries.
     trace("spawn", &serde_json::json!({ "command": spec.command, "sockets": spec.sockets.len(), "env": spec.env, "settings": session_settings }).to_string());
     let (tunnel, mut output) = tunnel::Tunnel::start(config, spec, inbox).await?;
     let tunnel = Arc::new(tunnel);
@@ -80,7 +69,6 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
     });
     let relay = Relay::new(ws, &args, env_prompt, to_claude, to_host);
 
-    // Everything queued before the host's input ended goes to claude first; then its stdin closes.
     let host_done = CancellationToken::new();
     let writer = tokio::spawn({
         let (host_done, tunnel) = (host_done.clone(), tunnel.clone());
@@ -98,7 +86,6 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
         }
     });
 
-    // Host lines go in order: initialize waits for the environment prompt, and nothing may pass it.
     let reader = tokio::spawn({
         let (relay, host_done) = (relay.clone(), host_done.clone());
         async move {
@@ -118,7 +105,6 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
         }
     });
 
-    // claude's output, split into lines for the relay; its stderr goes to ours.
     let mut pending: Vec<u8> = Vec::new();
     let take = |chan: u32, bytes: Vec<u8>, pending: &mut Vec<u8>| {
         if chan != tunnel::STDIO_CHANNEL {
@@ -156,7 +142,6 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
     relay.close().await;
     agent.end().await;
     tunnel.finish().await;
-    // A save the session made just before it ended is still on its way here.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), delivered.config.saves.settled()).await;
     hub.close();
     kill_all_commands();

@@ -1,20 +1,3 @@
-//! Which MCP servers a session gets, and where each runs. All of it comes from this machine.
-//!
-//! The remote claude runs with `--strict-mcp-config`: nothing the remote machine has configured
-//! starts. Every server is defined here, and each says where it runs:
-//!
-//! | Defined in | Runs |
-//! |---|---|
-//! | `~/.config/claudette/mcp.json` (`claude mcp add --remote`), user scope or local scope (this project) | where its `runOn` says: `remote`, or here |
-//! | the project's `.mcp.json`, once approved | here |
-//! | this machine's `~/.claude.json`, user and local scope | here |
-//! | the caller's `--mcp-config` and `setMcpServers` | here |
-//!
-//! On a name clash the caller's servers win, then claudette's own (local scope over user scope),
-//! then `~/.claude.json`'s local scope, then `.mcp.json`, then `~/.claude.json`'s user scope. A
-//! server that runs here reaches claude through the relay or a forwarded socket; a remote one is
-//! started by the remote claude, inside its sandbox.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -64,14 +47,10 @@ impl Scope {
     }
 }
 
-/// Where a server is defined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    /// `~/.config/claudette/mcp.json`
     Claudette(Scope),
-    /// The project's `.mcp.json`.
     McpJson,
-    /// This machine's `~/.claude.json`.
     Claude(Scope),
 }
 
@@ -100,17 +79,13 @@ pub enum Approval {
 #[derive(Debug)]
 pub struct Server {
     pub name: String,
-    /// The definition as claude takes it: `runOn` removed, variables expanded.
     pub config: Object,
     pub origin: Origin,
     pub place: Place,
-    /// A `.mcp.json` server runs only once approved, as Claude Code asks before it starts one.
     pub approval: Approval,
     pub source: Source,
 }
 
-/// claudette's own MCP configuration, in `~/.claude.json`'s shape: `mcpServers` for user scope,
-/// `projects.<path>.mcpServers` for local scope.
 pub fn claudette_file() -> PathBuf {
     claudette_dir().join("mcp.json")
 }
@@ -129,14 +104,12 @@ fn read_object(path: &Path) -> Object {
     }
 }
 
-/// The key a project has in `projects`: its real path.
 pub fn project_key(cwd: &Path) -> String {
     std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()).to_string_lossy().into_owned()
 }
 
 static VAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}").expect("valid pattern"));
 
-/// `${VAR}` and `${VAR:-default}` in every string, from this machine's environment, as Claude Code expands them.
 pub fn expand(value: &mut Value) {
     match value {
         Value::String(s) if s.contains("${") => {
@@ -156,7 +129,6 @@ fn servers_in(value: Option<&Value>, origin: Origin, source: Source) -> Vec<Serv
         .filter_map(|(name, config)| {
             let mut config = config.as_object()?.clone();
             let run_on = config.remove("runOn");
-            // Only claudette's own file places a server; elsewhere `runOn` is not Claude Code's and stays out.
             let remote = matches!(origin, Origin::Claudette(_)) && run_on.as_ref().and_then(Value::as_str) == Some("remote");
             let mut value = Value::Object(config);
             expand(&mut value);
@@ -170,8 +142,6 @@ fn names(value: Option<&Value>) -> Vec<String> {
     value.and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
 }
 
-/// Whether the project's `.mcp.json` servers are approved, as Claude Code records it: in the
-/// project's settings, or in its entry in `~/.claude.json`. Returns (all, enabled, disabled).
 fn approvals(cwd: &Path, claude_entry: &Object) -> (bool, Vec<String>, Vec<String>) {
     let mut all = claude_entry.get("enableAllProjectMcpServers").and_then(Value::as_bool).unwrap_or(false);
     let mut enabled = names(claude_entry.get("enabledMcpjsonServers"));
@@ -185,8 +155,6 @@ fn approvals(cwd: &Path, claude_entry: &Object) -> (bool, Vec<String>, Vec<Strin
     (all, enabled, disabled)
 }
 
-/// Every server defined for a project directory: the winning definition for each name.
-/// `mcp_json` follows `--setting-sources` (whether the project's settings load).
 pub fn servers(cwd: &Path, mcp_json: bool) -> Vec<Server> {
     let key = project_key(cwd);
     let claude = read_object(&claude_file());
@@ -219,7 +187,6 @@ pub fn servers(cwd: &Path, mcp_json: bool) -> Vec<Server> {
     let own_local = servers_in(claudette_entry.get("mcpServers"), Origin::Claudette(Scope::Local), Source::Local);
 
     let order: Vec<String> = claude_user.iter().chain(&own_user).chain(&project).chain(&claude_local).chain(&own_local).map(|s| s.name.clone()).collect();
-    // Lowest precedence first; a later definition replaces an earlier one.
     let mut winners: HashMap<String, Server> = HashMap::new();
     for server in claude_user.into_iter().chain(project).chain(claude_local).chain(own_user).chain(own_local) {
         winners.insert(server.name.clone(), server);
@@ -227,8 +194,6 @@ pub fn servers(cwd: &Path, mcp_json: bool) -> Vec<Server> {
     order.into_iter().filter_map(|name| winners.remove(&name)).collect()
 }
 
-/// Adds this machine's servers to the session, beside the caller's own (which win). With the
-/// caller's `--strict-mcp-config`, only the caller's servers run, as with claude.
 pub fn add_servers(p: &mut ParsedArgs, cwd: &Path) {
     if p.strict_mcp {
         return;
@@ -260,8 +225,6 @@ pub fn add_servers(p: &mut ParsedArgs, cwd: &Path) {
     }
 }
 
-/// Reads a configuration file to change it: missing is empty, but one that does not parse stops the
-/// change instead of being replaced.
 fn read_for_change(path: &Path) -> anyhow::Result<Object> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -283,8 +246,6 @@ fn write_pretty(path: &Path, value: &Object) -> anyhow::Result<()> {
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
-/// The file a server of a scope and place lives in: where Claude Code keeps it (`~/.claude.json`,
-/// the project's `.mcp.json`), or claudette's own file for a server that runs remotely.
 fn scope_file(cwd: &Path, scope: Scope, place: Place) -> PathBuf {
     match (scope, place) {
         (Scope::Project, _) => cwd.join(".mcp.json"),
@@ -293,7 +254,6 @@ fn scope_file(cwd: &Path, scope: Scope, place: Place) -> PathBuf {
     }
 }
 
-/// The `mcpServers` object of a scope in its file, created when missing.
 fn scope_servers<'a>(root: &'a mut Object, scope: Scope, cwd: &Path) -> &'a mut Object {
     let holder = if scope == Scope::Local {
         let projects = root.entry("projects").or_insert_with(|| json!({}));
@@ -393,7 +353,6 @@ mod tests {
 
     #[test]
     fn variables_expand_with_defaults() {
-        // SAFETY: tests in this module are the only readers of this variable.
         unsafe { std::env::set_var("CT_MCP_TOKEN", "t0k") };
         let mut v = json!({ "headers": { "Authorization": "Bearer ${CT_MCP_TOKEN}" }, "args": ["${CT_MCP_MISSING:-fallback}", "${CT_MCP_MISSING}"] });
         expand(&mut v);

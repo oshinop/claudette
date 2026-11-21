@@ -1,9 +1,3 @@
-//! claude used directly: interactively, or with `-p`. There is no SDK host on a pipe to talk to, so
-//! claude reaches the local tools through a remote stdio MCP shim; tool calls then use a Unix socket
-//! the run's holder carries back here over the link (see [`crate::sockets`]).
-//! A PreToolUse hook, over a socket of its own, makes the permission decisions claude makes for its
-//! own tools (acceptEdits, Bash rules), which it does not make for MCP tools.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -26,9 +20,6 @@ use crate::sockets::{Forwards, SocketHub};
 use crate::ssh::{claude_command, forwarded_env, shell_quote};
 use crate::tools::{Workspace, kill_all_commands};
 
-/// Adds claudette's hooks to the caller's settings, keeping the caller's own: a PreToolUse hook
-/// for the tools claudette decides for (Bash, the edit tools, and the read tools an ask rule
-/// covers), and the hooks that tell it whether the session is working, idle or waiting for input.
 fn with_hook(settings: Option<Object>, pretool_command: &str, notify_command: &str, ask_tools: &[&str]) -> Object {
     let mut tools: Vec<&str> = std::iter::once("Bash").chain(EDIT_TOOLS).collect();
     tools.extend(ask_tools.iter().filter(|t| !tools.contains(t)).collect::<Vec<_>>());
@@ -95,7 +86,6 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
             bridge.set_notify(notify);
             servers.insert(name.clone(), json!({ "type": "stdio", "command": config.remote_nc, "args": ["-U", forwards.add(&path)] }));
         }
-        // Remote servers: the remote claude starts them from their own definitions.
         for (name, server_config) in &p.remote_servers {
             if name == SERVER {
                 warn(&format!("ignoring the MCP server \"{name}\": the name is taken by claudette"));
@@ -107,7 +97,6 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
 
         let policy = Arc::new(Policy::new(p.permission_mode.as_deref().unwrap_or("default"), p.bash_allow.clone(), p.bash_deny.clone(), p.tool_allows.clone()));
         let hook_ws = ws.clone();
-        // Events nobody waits on can arrive out of order: an older one's status is let be.
         let latest = std::sync::atomic::AtomicU64::new(0);
         let hook = hub.serve_hook(Arc::new(move |input: &Object| {
             let sent = input.get(crate::helper::holder::SENT_AT).and_then(Value::as_u64);
@@ -123,7 +112,6 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
                 return json!({});
             }
             let mode = str_field(input, "permission_mode");
-            // Decided on the remote machine (a Bash call): only recorded here.
             if let Some(decision) = input.get(crate::helper::holder::DECIDED) {
                 let tool = str_field(input, "tool_name").and_then(|n| n.strip_prefix(PREFIX)).unwrap_or("");
                 trace("hook", &json!({ "tool": tool, "mode": mode, "decision": decision }).to_string());
@@ -157,16 +145,13 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
         let mcp_config = Some(forwards.file("mcp.json", json!({ "mcpServers": servers }).to_string().into_bytes()));
         let plugin_dir = delivered.plugins.is_some().then(|| workdir::plugins_dir(&forwards.run));
         let args = remote_args(&p, &RemoteExtras { mirror: false, mcp_config, settings_file, append_system_prompt_file, plugin_dir });
-        // The local CLAUDE.md files arrive in the environment prompt; the remote machine's stay out.
         let mut env = forwarded_env(std::env::vars(), &config.forward_env, config.forward_claude_env);
         env.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), "1".into());
         env.insert(crate::settings::AGENT_TEAMS.into(), "0".into());
         env.insert(crate::settings::AGENT_VIEW.into(), "1".into());
         let script = workdir::mount(cwd, &forwards, &delivered);
         let tty = is_tty();
-        // claude's environment travels with the run, never on the remote command line.
         let mut run_env: serde_json::Map<String, Value> = env.into_iter().map(|(k, v)| (k, json!(v))).collect();
-        // A terminal's own settings go with it, as ssh -t would send them.
         if tty {
             for key in ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE"] {
                 if let Ok(value) = std::env::var(key) {
@@ -182,13 +167,10 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
             pty: if tty { Some(crate::tunnel::terminal_size().unwrap_or((24, 80))) } else { None },
             env: run_env,
         };
-        // The frame log (this machine's, opt-in) records what the command line no longer carries.
         trace("spawn", &json!({ "command": spec.command, "sockets": spec.sockets.len(), "env": spec.env, "settings": settings }).to_string());
         let (tunnel, output) = crate::tunnel::Tunnel::start(config, spec, inbox).await?;
-        // A host stopping us (T3 Code timing out text generation) stops the remote claude too.
         let code = tunnel.attach_stdio(output, tty).await;
         tunnel.finish().await;
-        // A save the session made just before it ended is still on its way here.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), delivered.config.saves.settled()).await;
         code
     }

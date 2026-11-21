@@ -30,7 +30,7 @@ To run claudette from T3 Code, Paseo, magpie or an Agent SDK program, see [hosts
 
 MCP servers are set up on the local machine with `claude mcp`, which writes the same files a local claude
 writes: `~/.claude.json` for user and local scope, the project's `.mcp.json` for project scope.
-These servers run on the local machine.
+These servers run on the local machine, so a server on its `localhost` works too.
 
 ```sh
 claude mcp add --scope user fs -- npx @modelcontextprotocol/server-filesystem .
@@ -46,9 +46,14 @@ the remote machine's network or files:
 claude mcp add --remote --transport http docs https://example.com/mcp -H 'Authorization: Bearer …'
 ```
 
-`claude mcp add-json` and `claude mcp get` work too. `${VAR}` in a server's settings is filled in
-from the local machine's environment, for remote servers as well. A project's `.mcp.json` servers start once
-you approve them, as in Claude Code.
+`claude mcp list` and `claude mcp get` check each server as Claude Code does, a remote server from
+the remote machine. `claude mcp add-json` and `claude mcp reset-project-choices` work too. `${VAR}`
+in a server's settings is filled in from the local machine's environment, for remote servers as
+well. A server's `headersHelper` runs on the local machine.
+
+A project's `.mcp.json` servers start once you approve them. claudette shows no approval prompt:
+`claude mcp add --scope project` approves the server it adds, and you approve others with
+`"enabledMcpjsonServers"` in `.claude/settings.local.json`.
 
 ## Plugins
 

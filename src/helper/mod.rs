@@ -71,12 +71,30 @@ pub fn main(args: &[String]) -> i32 {
         (Some("notify"), Some(socket)) if args.len() == 2 => runtime.block_on(holder::notify(socket)),
         (Some("hook"), Some(rules)) if args.len() == 3 => runtime.block_on(holder::hook(rules, &args[2])),
         (Some("config"), _) => runtime.block_on(config::serve(&args[1..])),
+        (Some("probe"), None) => runtime.block_on(probe()),
         (Some("sftp"), _) => runtime.block_on(near::serve(&args[1..])),
         _ => {
             eprintln!("claudette: unknown helper command");
             2
         }
     }
+}
+
+async fn probe() -> i32 {
+    use tokio::io::AsyncReadExt;
+    let mut input = String::new();
+    if tokio::io::stdin().read_to_string(&mut input).await.is_err() {
+        return 1;
+    }
+    let Ok(Value::Object(servers)) = serde_json::from_str::<Value>(&input) else { return 1 };
+    let launch = crate::mcp::bridge::Launch::new(&crate::config::home(), &[], crate::mcp::Source::User);
+    let checks = servers.iter().filter_map(|(name, config)| Some((name, config.as_object()?))).map(|(name, config)| {
+        let launch = &launch;
+        async move { (name.clone(), crate::mcp::bridge::probe(name, config, launch).await.to_json()) }
+    });
+    let results: Map<String, Value> = futures_util::future::join_all(checks).await.into_iter().collect();
+    println!("{}", Value::Object(results));
+    0
 }
 
 /// Run ids are claudette's own 16 hex digits; nothing else may name a path.

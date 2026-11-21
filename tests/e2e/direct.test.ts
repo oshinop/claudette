@@ -140,6 +140,17 @@ chmod 755 /tmp/probe-claude`,
     expect(all.some((r) => JSON.stringify(r.messages).includes("prompt-from-local"))).toBe(true);
   });
 
+  test("a local server's roots are the local project, and its elicitation reaches claude, which cancels it with nobody to ask", async () => {
+    const dir = project();
+    const id = await scenario([{ tool: "roots", input: {} }, { tool: "ask", input: {} }, { text: "{{last_tool_result}}" }]);
+    const config = { mcpServers: { local: { type: "stdio", command: "bun", args: ["/app/fixtures/stdio-mcp.ts"] } } };
+    const run = claude(dir, ["-p", `[[scenario:${id}]] roots`, "--output-format", "json", "--mcp-config", JSON.stringify(config), "--strict-mcp-config", "--allowedTools", "mcp__local__roots,mcp__local__ask"], { ENABLE_TOOL_SEARCH: "false" });
+
+    expect(run.result.result, run.out).toBe("elicited:cancel:");
+    const requests = await modelRequests(id);
+    expect(JSON.stringify(requests[1]!.messages.at(-1))).toContain(`roots:file://${realpathSync(dir)}`);
+  });
+
   test("a session an SDK host (T3 Code) started continues from the terminal with --resume", async () => {
     const dir = project();
     const id = await scenario([{ text: "turn-done" }]);
@@ -195,9 +206,8 @@ describe("MCP servers: all configured on the local machine, each running where i
     const [first] = await modelRequests(id);
     expect(first!.tools.filter((t) => t.startsWith("mcp__unapproved__"))).toEqual([]);
     const listing = mcp(dir, "list").out;
-    expect(listing).toContain(`where: bun ${FIXTURE}  (runs on this machine; project (.mcp.json))`);
-    expect(listing).toContain("unapproved: bun");
-    expect(listing).toContain("NOT APPROVED");
+    expect(listing).toContain(`where: bun ${FIXTURE} - ✔ Connected`);
+    expect(listing).toContain(`unapproved: bun ${FIXTURE} - ⏸ Pending approval`);
   });
 
   test("a server set to run remotely runs on the remote machine, with its secrets kept off the command line; the remote machine's own servers never start", async () => {
@@ -207,9 +217,11 @@ describe("MCP servers: all configured on the local machine, each running where i
     try {
       const dir = project();
       const token = `tok-${Math.random().toString(36).slice(2)}`;
-      const add = mcp(dir, "add", "--remote", "-e", `TOKEN=${token}`, "remote-where", "node", server);
+      const add = mcp(dir, "add", "--remote", "-e", `TOKEN=${token}`, "--", "remote-where", "node", server);
       expect(add.code, add.out).toBe(0);
-      expect(add.out).toContain("local scope, runs on remote");
+      expect(add.out).toContain("to local config\nRuns on: remote");
+      expect(mcp(dir, "list").out).toContain(`remote-where: node ${server} - ✔ Connected`);
+      expect(mcp(dir, "get", "remote-where").out).toContain("  Scope: Local config (private to you in this project)\n  Runs on: remote\n  Status: ✔ Connected");
 
       const id = await scenario([{ tool: "where", input: {} }, { text: "{{last_tool_result}}" }]);
       const run = claude(dir, ["-p", `[[scenario:${id}]] where`, "--output-format", "json", "--allowedTools", "mcp__remote-where__where"], { ENABLE_TOOL_SEARCH: "false" });
@@ -231,9 +243,30 @@ describe("MCP servers: all configured on the local machine, each running where i
     const dir = project();
     const add = mcp(dir, "add", "--scope", "project", "proj-server", "--", "bun", FIXTURE);
     expect(add.code, add.out).toBe(0);
-    expect(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")).mcpServers["proj-server"]).toEqual({ command: "bun", args: [FIXTURE] });
+    expect(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")).mcpServers["proj-server"]).toEqual({ type: "stdio", command: "bun", args: [FIXTURE], env: {} });
     expect(JSON.parse(readFileSync(join(dir, ".claude", "settings.local.json"), "utf8")).enabledMcpjsonServers).toEqual(["proj-server"]);
     expect(mcp(dir, "add", "--scope", "project", "--remote", "x", "y").code).not.toBe(0);
+  });
+
+  test("a headersHelper runs on the local machine for each connection, and its token reaches the local http server", async () => {
+    const token = `helper-${Math.random().toString(36).slice(2)}`;
+    const http = Bun.spawn(["bun", "/app/fixtures/http-mcp-server.ts", token], { stdout: "pipe" });
+    try {
+      const reader = http.stdout.getReader();
+      const url = new TextDecoder().decode((await reader.read()).value).trim();
+      const dir = project({ "token.sh": `printf '{"Authorization":"Bearer ${token}"}'` });
+      const add = mcp(dir, "add-json", "helped", JSON.stringify({ type: "http", url, headersHelper: "sh ./token.sh" }));
+      expect(add.out).toBe("Added http MCP server helped to local config\n");
+      expect(mcp(dir, "list").out).toContain(`helped: ${url} (HTTP) - ✔ Connected`);
+
+      const id = await scenario([{ tool: "whoami", input: {} }, { text: "{{last_tool_result}}" }]);
+      const run = claude(dir, ["-p", `[[scenario:${id}]] who`, "--output-format", "json", "--allowedTools", "mcp__helped__whoami"], { ENABLE_TOOL_SEARCH: "false" });
+      expect(run.result.result, run.out).toBe("http-server-on:local");
+      expect(run.spawn).not.toContain(token);
+      expect(mcp(dir, "remove", "helped").code).toBe(0);
+    } finally {
+      http.kill();
+    }
   });
 
   test("user and local scope land in the local machine's ~/.claude.json, where a local claude keeps them, and the server runs", async () => {
@@ -248,8 +281,8 @@ describe("MCP servers: all configured on the local machine, each running where i
       expect(add.code, add.out).toBe(0);
       const saved = JSON.parse(readFileSync(claudeJson, "utf8"));
       expect(saved.theme).toBe("dark");
-      expect(saved.mcpServers["user-where"]).toEqual({ command: "bun", args: [FIXTURE] });
-      expect(saved.projects[realpathSync(dir)].mcpServers["local-where"]).toEqual({ command: "bun", args: [FIXTURE] });
+      expect(saved.mcpServers["user-where"]).toEqual({ type: "stdio", command: "bun", args: [FIXTURE], env: {} });
+      expect(saved.projects[realpathSync(dir)].mcpServers["local-where"]).toEqual({ type: "stdio", command: "bun", args: [FIXTURE], env: {} });
 
       const id = await scenario([{ tool: "where", input: {} }, { text: "{{last_tool_result}}" }]);
       const run = claude(dir, ["-p", `[[scenario:${id}]] where`, "--output-format", "json", "--allowedTools", "mcp__local-where__where"], { ENABLE_TOOL_SEARCH: "false" });
@@ -257,7 +290,7 @@ describe("MCP servers: all configured on the local machine, each running where i
 
       expect(mcp(dir, "remove", "local-where").code).toBe(0);
       expect(mcp(dir, "remove", "user-where").code).toBe(0);
-      expect(mcp(dir, "list").out).toContain("No MCP servers");
+      expect(mcp(dir, "list").out).toContain("No MCP servers configured");
       // A ~/.claude.json that does not parse is left alone rather than replaced.
       writeFileSync(claudeJson, "{ not json");
       expect(mcp(dir, "add", "--scope", "user", "x", "--", "y").code).not.toBe(0);

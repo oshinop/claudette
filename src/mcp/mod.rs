@@ -3,15 +3,32 @@
 //! notifications are forwarded without a response.
 
 pub mod bridge;
+pub mod cli;
 pub mod config;
 pub mod local;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::json::Object;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    Caller,
+    User,
+    Local,
+    Project(PathBuf),
+    Plugin(PathBuf),
+}
+
+#[derive(Clone, Debug)]
+pub struct LocalServer {
+    pub config: Object,
+    pub source: Source,
+}
 
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INTERNAL_ERROR: i64 = -32603;

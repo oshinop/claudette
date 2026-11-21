@@ -55,12 +55,15 @@ Hosts such as T3 Code and Paseo don't have these; they apply when you run `claud
 
 ## MCP servers
 
-- Servers that run on the local machine can't ask the client for anything: sampling, elicitation and roots
-  are refused, and they can't complete an OAuth login.
+- Servers that run on the local machine can't complete an OAuth login.
 - In SDK hosts such as T3 Code, those servers' prompts aren't offered as slash commands. Terminal
   and `-p` sessions do offer them.
 - Servers you add with `--remote` run on the remote machine inside the sandbox. They see the project
-  and Claude Code's own state, and nothing else in the remote home folder.
+  and Claude Code's own state, and nothing else in the remote home folder. `claude mcp list` and
+  `claude mcp get` check them from the remote home folder, outside the sandbox.
+- `claude mcp serve` and `claude mcp add-from-claude-desktop` aren't available.
+- The local machine's organization MCP policy isn't applied: `managed-mcp.json`, and
+  `managedMcpServers`, `allowedMcpServers` and `deniedMcpServers` in its managed settings.
 
 ## Sessions talking to each other
 

@@ -275,9 +275,11 @@ claude mcp list
 claude mcp remove docs
 ```
 
-A `~/.claude.json` that does not parse is left alone rather than rewritten. Adding a server with or
-without `--remote` moves it between the two files. `claude mcp serve`, `add-from-claude-desktop` and
-`reset-project-choices` are not available.
+A `~/.claude.json` that does not parse is left alone rather than rewritten. Adding a server whose
+name its scope already has fails, as in Claude Code, in either file. `list` and `get` print Claude
+Code's statuses after connecting to each server: here for local servers, and for remote ones through
+the helper's `probe` command on the remote machine, one ssh call for all of them. `claude mcp serve`
+and `add-from-claude-desktop` are not available.
 
 On a name clash the host's servers win, then claudette's own (local scope over user scope), then
 `~/.claude.json`'s local scope, the project's `.mcp.json`, and `~/.claude.json`'s user scope.
@@ -286,7 +288,18 @@ On a name clash the host's servers win, then claudette's own (local scope over u
 - Servers that run here reach claude through the relay or a socket the helper serves, so a server on
   the local machine's `localhost` (T3 Code runs one) works, and tokens in headers stay on the local machine. The
   bridge forwards MCP tools, resources, prompts, completions and server notifications unchanged. For
-  Streamable HTTP it also keeps the optional GET event stream open and resumes it after a disconnect.
+  Streamable HTTP it also keeps the optional GET event stream open and resumes it after a disconnect,
+  and falls back to SSE at the same URL when the server refuses the first POST. WebSocket servers
+  (`"type": "ws"`) connect from here too.
+- The bridge declares Claude Code's client capabilities (roots, form and URL elicitation). It answers
+  `roots/list` itself with the session's local folders. An elicitation goes to claude over the socket
+  in a terminal or `-p` session; in an SDK session the relay sends it to the host as Claude Code's
+  `elicitation` control request and returns the host's answer to the server, `cancel` when the host
+  answers with an error.
+- A `headersHelper` runs here, as Claude Code runs it: in a shell, from the project folder (local
+  scope, `.mcp.json`), `~/.claude` (user scope) or the plugin's root, for at most ten seconds, without
+  credential-like variables when a repository or plugin supplied it, and again after a tool call
+  answered 401 or 403.
 - Remote servers are started by the remote claude, inside its sandbox, with their working directory in
   the mounted project. Their definitions reach the remote machine as a file only the remote user can
   read, sent with the run's first frames and removed at the end, never on a command line.

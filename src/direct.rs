@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::json::{Object, str_field};
 use crate::log::{trace, warn};
 use crate::mcp::Endpoint;
-use crate::mcp::bridge::Bridge;
+use crate::mcp::bridge::{Bridge, Launch};
 use crate::mcp::local::LocalTools;
 use crate::names::{EDIT_TOOLS, PREFIX, SERVER, is_local_tool};
 use crate::mount::workdir;
@@ -84,12 +84,12 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
             let command = format!("exec \"$CLAUDETTE_HELPER\" __helper mcp {} {}", shell_quote(&socket), shell_quote(&manifest));
             servers.insert(SERVER.into(), json!({ "type": "stdio", "command": "sh", "args": ["-c", command] }));
         }
-        for (name, server_config) in &p.config_servers {
+        for (name, server) in &p.config_servers {
             if name == SERVER {
                 warn(&format!("ignoring the MCP server \"{name}\": the name is taken by claudette"));
                 continue;
             }
-            let bridge = Arc::new(Bridge::new(name, server_config.clone(), cwd.to_path_buf()));
+            let bridge = Arc::new(Bridge::new(name, server.config.clone(), Launch::new(cwd, &ws.extra_dirs, server.source.clone())));
             bridges.push(bridge.clone());
             let (path, notify) = hub.serve_mcp(name, Endpoint::Bridge(bridge.clone()))?;
             bridge.set_notify(notify);

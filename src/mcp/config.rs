@@ -15,7 +15,7 @@
 //! server that runs here reaches claude through the relay or a forwarded socket; a remote one is
 //! started by the remote claude, inside its sandbox.
 
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 use crate::args::ParsedArgs;
 use crate::config::{home, claudette_dir};
 use crate::json::Object;
+use crate::mcp::{LocalServer, Source};
 use crate::log::warn;
 use crate::settings::{SETTINGS_FILES, Sources};
 
@@ -42,7 +43,7 @@ impl Scope {
             "user" => Ok(Scope::User),
             "local" => Ok(Scope::Local),
             "project" => Ok(Scope::Project),
-            other => bail!("unknown scope {other}: use user, local or project"),
+            other => bail!("Invalid scope: {other}. Must be one of: local, user, project"),
         }
     }
 
@@ -51,6 +52,14 @@ impl Scope {
             Scope::User => "user",
             Scope::Local => "local",
             Scope::Project => "project",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Scope::User => "User config (available in all your projects)",
+            Scope::Local => "Local config (private to you in this project)",
+            Scope::Project => "Project config (shared via .mcp.json)",
         }
     }
 }
@@ -67,13 +76,10 @@ pub enum Origin {
 }
 
 impl Origin {
-    pub fn label(self) -> &'static str {
+    pub fn scope(self) -> Scope {
         match self {
-            Origin::Claudette(Scope::User) => "claudette, user",
-            Origin::Claudette(_) => "claudette, local (this project)",
-            Origin::McpJson => "project (.mcp.json)",
-            Origin::Claude(Scope::User) => "~/.claude.json, user",
-            Origin::Claude(_) => "~/.claude.json, local (this project)",
+            Origin::Claudette(scope) | Origin::Claude(scope) => scope,
+            Origin::McpJson => Scope::Project,
         }
     }
 }
@@ -84,6 +90,13 @@ pub enum Place {
     Remote,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    Approved,
+    Pending,
+    Rejected,
+}
+
 #[derive(Debug)]
 pub struct Server {
     pub name: String,
@@ -92,7 +105,8 @@ pub struct Server {
     pub origin: Origin,
     pub place: Place,
     /// A `.mcp.json` server runs only once approved, as Claude Code asks before it starts one.
-    pub approved: bool,
+    pub approval: Approval,
+    pub source: Source,
 }
 
 /// claudette's own MCP configuration, in `~/.claude.json`'s shape: `mcpServers` for user scope,
@@ -116,7 +130,7 @@ fn read_object(path: &Path) -> Object {
 }
 
 /// The key a project has in `projects`: its real path.
-fn project_key(cwd: &Path) -> String {
+pub fn project_key(cwd: &Path) -> String {
     std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()).to_string_lossy().into_owned()
 }
 
@@ -136,7 +150,7 @@ pub fn expand(value: &mut Value) {
     }
 }
 
-fn servers_in(value: Option<&Value>, origin: Origin) -> Vec<Server> {
+fn servers_in(value: Option<&Value>, origin: Origin, source: Source) -> Vec<Server> {
     let Some(map) = value.and_then(Value::as_object) else { return vec![] };
     map.iter()
         .filter_map(|(name, config)| {
@@ -147,7 +161,7 @@ fn servers_in(value: Option<&Value>, origin: Origin) -> Vec<Server> {
             let mut value = Value::Object(config);
             expand(&mut value);
             let Value::Object(config) = value else { return None };
-            Some(Server { name: name.clone(), config, origin, place: if remote { Place::Remote } else { Place::Here }, approved: true })
+            Some(Server { name: name.clone(), config, origin, place: if remote { Place::Remote } else { Place::Here }, approval: Approval::Approved, source: source.clone() })
         })
         .collect()
 }
@@ -180,29 +194,37 @@ pub fn servers(cwd: &Path, mcp_json: bool) -> Vec<Server> {
     let entry = |root: &Object| root.get("projects").and_then(|p| p.get(&key)).and_then(Value::as_object).cloned().unwrap_or_default();
     let (claude_entry, claudette_entry) = (entry(&claude), entry(&own));
 
-    // Lowest precedence first; a later definition replaces an earlier one.
-    let mut layers = vec![servers_in(claude.get("mcpServers"), Origin::Claude(Scope::User))];
+    let claude_user = servers_in(claude.get("mcpServers"), Origin::Claude(Scope::User), Source::User);
+    let mut project = vec![];
     if mcp_json {
         let (all, enabled, disabled) = approvals(cwd, &claude_entry);
         let mut dirs: Vec<&Path> = cwd.ancestors().collect();
         dirs.reverse();
         for dir in dirs {
-            let mut found = servers_in(read_object(&dir.join(".mcp.json")).get("mcpServers"), Origin::McpJson);
+            let mut found = servers_in(read_object(&dir.join(".mcp.json")).get("mcpServers"), Origin::McpJson, Source::Project(dir.to_path_buf()));
             for server in &mut found {
-                server.approved = !disabled.contains(&server.name) && (all || enabled.contains(&server.name));
+                server.approval = if disabled.contains(&server.name) {
+                    Approval::Rejected
+                } else if all || enabled.contains(&server.name) {
+                    Approval::Approved
+                } else {
+                    Approval::Pending
+                };
             }
-            layers.push(found);
+            project.extend(found);
         }
     }
-    layers.push(servers_in(claude_entry.get("mcpServers"), Origin::Claude(Scope::Local)));
-    layers.push(servers_in(own.get("mcpServers"), Origin::Claudette(Scope::User)));
-    layers.push(servers_in(claudette_entry.get("mcpServers"), Origin::Claudette(Scope::Local)));
+    let claude_local = servers_in(claude_entry.get("mcpServers"), Origin::Claude(Scope::Local), Source::Local);
+    let own_user = servers_in(own.get("mcpServers"), Origin::Claudette(Scope::User), Source::User);
+    let own_local = servers_in(claudette_entry.get("mcpServers"), Origin::Claudette(Scope::Local), Source::Local);
 
-    let mut winners: BTreeMap<String, Server> = BTreeMap::new();
-    for server in layers.into_iter().flatten() {
+    let order: Vec<String> = claude_user.iter().chain(&own_user).chain(&project).chain(&claude_local).chain(&own_local).map(|s| s.name.clone()).collect();
+    // Lowest precedence first; a later definition replaces an earlier one.
+    let mut winners: HashMap<String, Server> = HashMap::new();
+    for server in claude_user.into_iter().chain(project).chain(claude_local).chain(own_user).chain(own_local) {
         winners.insert(server.name.clone(), server);
     }
-    winners.into_values().collect()
+    order.into_iter().filter_map(|name| winners.remove(&name)).collect()
 }
 
 /// Adds this machine's servers to the session, beside the caller's own (which win). With the
@@ -216,17 +238,25 @@ pub fn add_servers(p: &mut ParsedArgs, cwd: &Path) {
         if p.config_servers.contains_key(&server.name) {
             continue;
         }
-        if !server.approved {
-            warn(&format!(
-                "not starting the .mcp.json server \"{}\": approve it with \"enabledMcpjsonServers\": [\"{}\"] in .claude/settings.local.json",
-                server.name, server.name
-            ));
-            continue;
+        match server.approval {
+            Approval::Approved => {}
+            Approval::Rejected => continue,
+            Approval::Pending => {
+                warn(&format!(
+                    "not starting the .mcp.json server \"{}\": approve it with \"enabledMcpjsonServers\": [\"{}\"] in .claude/settings.local.json",
+                    server.name, server.name
+                ));
+                continue;
+            }
         }
         match server.place {
-            Place::Here => p.config_servers.insert(server.name, server.config),
-            Place::Remote => p.remote_servers.insert(server.name, server.config),
-        };
+            Place::Here => {
+                p.config_servers.insert(server.name, LocalServer { config: server.config, source: server.source });
+            }
+            Place::Remote => {
+                p.remote_servers.insert(server.name, server.config);
+            }
+        }
     }
 }
 
@@ -275,10 +305,6 @@ fn scope_servers<'a>(root: &'a mut Object, scope: Scope, cwd: &Path) -> &'a mut 
     holder.entry("mcpServers").or_insert_with(|| json!({})).as_object_mut().expect("mcpServers is an object")
 }
 
-/// Adds or replaces a server, as `claude mcp add` does: user and local scope in `~/.claude.json`,
-/// project scope in the project's `.mcp.json`, approved for this machine in
-/// `.claude/settings.local.json` since you added it. A remote server goes to claudette's file,
-/// the one place `runOn` means something; a server of the same name and scope in the other file goes.
 pub fn add(cwd: &Path, scope: Scope, name: &str, mut config: Object, place: Place) -> anyhow::Result<PathBuf> {
     if scope == Scope::Project && place == Place::Remote {
         bail!("a project's .mcp.json servers run on this machine; add a remote server with --scope user or local");
@@ -290,13 +316,6 @@ pub fn add(cwd: &Path, scope: Scope, name: &str, mut config: Object, place: Plac
     let mut root = read_for_change(&file)?;
     scope_servers(&mut root, scope, cwd).insert(name.to_owned(), Value::Object(config));
     write_pretty(&file, &root)?;
-    if scope != Scope::Project {
-        let other = scope_file(cwd, scope, if place == Place::Here { Place::Remote } else { Place::Here });
-        let mut root = read_for_change(&other)?;
-        if scope_servers(&mut root, scope, cwd).remove(name).is_some() {
-            write_pretty(&other, &root)?;
-        }
-    }
     if scope == Scope::Project {
         let local = cwd.join(".claude").join("settings.local.json");
         let mut settings = read_for_change(&local)?;
@@ -310,30 +329,54 @@ pub fn add(cwd: &Path, scope: Scope, name: &str, mut config: Object, place: Plac
     Ok(file)
 }
 
-/// Removes a server from the scope given, or from the one scope that has it.
-pub fn remove(cwd: &Path, scope: Option<Scope>, name: &str) -> anyhow::Result<(Scope, PathBuf)> {
-    let homes = |scope: Scope| -> Vec<PathBuf> {
-        let files = if scope == Scope::Project { vec![scope_file(cwd, scope, Place::Here)] } else { vec![claude_file(), claudette_file()] };
-        files.into_iter().filter(|f| scope_servers(&mut read_object(f), scope, cwd).contains_key(name)).collect()
-    };
+pub fn files_with(cwd: &Path, scope: Scope, name: &str) -> Vec<PathBuf> {
+    let files = if scope == Scope::Project { vec![scope_file(cwd, scope, Place::Here)] } else { vec![claude_file(), claudette_file()] };
+    files.into_iter().filter(|f| scope_servers(&mut read_object(f), scope, cwd).contains_key(name)).collect()
+}
+
+pub enum Removal {
+    Removed(Scope, PathBuf),
+    Missing,
+    Ambiguous(Vec<(Scope, PathBuf)>),
+}
+
+pub fn remove(cwd: &Path, scope: Option<Scope>, name: &str) -> anyhow::Result<Removal> {
     let (scope, files) = match scope {
-        Some(scope) => (scope, homes(scope)),
+        Some(scope) => (scope, files_with(cwd, scope, name)),
         None => {
-            let found: Vec<(Scope, Vec<PathBuf>)> = [Scope::Local, Scope::User, Scope::Project].into_iter().map(|s| (s, homes(s))).filter(|(_, f)| !f.is_empty()).collect();
+            let mut found: Vec<(Scope, Vec<PathBuf>)> = [Scope::Local, Scope::User, Scope::Project].into_iter().map(|s| (s, files_with(cwd, s, name))).filter(|(_, f)| !f.is_empty()).collect();
             match found.len() {
-                1 => found.into_iter().next().expect("one"),
-                0 => bail!("no MCP server named {name}"),
-                _ => bail!("{name} is defined in more than one scope; choose one with --scope"),
+                0 => return Ok(Removal::Missing),
+                1 => found.remove(0),
+                _ => return Ok(Removal::Ambiguous(found.into_iter().map(|(s, f)| (s, f[0].clone())).collect())),
             }
         }
     };
-    let Some(first) = files.first().cloned() else { bail!("no MCP server named {name} in {} scope", scope.name()) };
+    let Some(first) = files.first().cloned() else { return Ok(Removal::Missing) };
     for file in files {
         let mut root = read_for_change(&file)?;
         scope_servers(&mut root, scope, cwd).remove(name);
         write_pretty(&file, &root)?;
     }
-    Ok((scope, first))
+    Ok(Removal::Removed(scope, first))
+}
+
+const CHOICES: [&str; 3] = ["enabledMcpjsonServers", "disabledMcpjsonServers", "enableAllProjectMcpServers"];
+
+pub fn reset_choices(cwd: &Path) -> anyhow::Result<()> {
+    let file = claude_file();
+    let mut root = read_for_change(&file)?;
+    if let Some(Value::Object(entry)) = root.get_mut("projects").and_then(|p| p.get_mut(&project_key(cwd)))
+        && CHOICES.iter().fold(false, |changed, key| entry.remove(*key).is_some() || changed)
+    {
+        write_pretty(&file, &root)?;
+    }
+    let local = cwd.join(".claude").join("settings.local.json");
+    let mut settings = read_for_change(&local)?;
+    if CHOICES.iter().fold(false, |changed, key| settings.remove(*key).is_some() || changed) {
+        write_pretty(&local, &settings)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -351,10 +394,10 @@ mod tests {
 
     #[test]
     fn only_claudettes_own_file_places_a_server_remotely() {
-        let own = servers_in(Some(&json!({ "a": { "command": "x", "runOn": "remote" }, "b": { "command": "y" } })), Origin::Claudette(Scope::User));
+        let own = servers_in(Some(&json!({ "a": { "command": "x", "runOn": "remote" }, "b": { "command": "y" } })), Origin::Claudette(Scope::User), Source::User);
         assert_eq!(own.iter().map(|s| (s.name.as_str(), s.place)).collect::<Vec<_>>(), [("a", Place::Remote), ("b", Place::Here)]);
         assert!(!own[0].config.contains_key("runOn"));
-        let claude = servers_in(Some(&json!({ "c": { "command": "z", "runOn": "remote" } })), Origin::Claude(Scope::User));
+        let claude = servers_in(Some(&json!({ "c": { "command": "z", "runOn": "remote" } })), Origin::Claude(Scope::User), Source::User);
         assert_eq!(claude[0].place, Place::Here);
     }
 
@@ -368,8 +411,8 @@ mod tests {
         std::fs::write(sub.join(".claude/settings.local.json"), r#"{"enabledMcpjsonServers":["shared"]}"#).unwrap();
         let found = servers(&sub, true);
         let shared = found.iter().find(|s| s.name == "shared").unwrap();
-        assert_eq!((shared.config["command"].as_str(), shared.approved), (Some("inner"), true));
-        assert!(!found.iter().find(|s| s.name == "other").unwrap().approved);
+        assert_eq!((shared.config["command"].as_str(), shared.approval), (Some("inner"), Approval::Approved));
+        assert_eq!(found.iter().find(|s| s.name == "other").unwrap().approval, Approval::Pending);
         assert!(servers(&sub, false).iter().all(|s| s.origin != Origin::McpJson));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -381,9 +424,9 @@ mod tests {
         add(&dir, Scope::Project, "p", json!({ "command": "x" }).as_object().unwrap().clone(), Place::Here).unwrap();
         assert_eq!(read_object(&dir.join(".mcp.json"))["mcpServers"]["p"], json!({ "command": "x" }));
         assert_eq!(read_object(&dir.join(".claude/settings.local.json"))["enabledMcpjsonServers"], json!(["p"]));
-        assert!(servers(&dir, true).iter().any(|s| s.name == "p" && s.approved));
+        assert!(servers(&dir, true).iter().any(|s| s.name == "p" && s.approval == Approval::Approved));
         assert!(add(&dir, Scope::Project, "q", Object::new(), Place::Remote).is_err());
-        assert_eq!(remove(&dir, Some(Scope::Project), "p").unwrap().0, Scope::Project);
+        assert!(matches!(remove(&dir, Some(Scope::Project), "p").unwrap(), Removal::Removed(Scope::Project, _)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

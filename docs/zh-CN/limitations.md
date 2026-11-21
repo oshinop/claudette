@@ -48,9 +48,11 @@ T3 Code 和 Paseo 等宿主没有这些问题；它们只适用于在终端中�
 <a id="mcp-servers"></a>
 ## MCP server
 
-- 在本地机器上运行的服务器无法向客户端提出任何请求：采样、信息征询和根目录请求都会被拒绝，也无法完成 OAuth 登录。
+- 在本地机器上运行的服务器无法完成 OAuth 登录。
 - 在 T3 Code 等 SDK 宿主中，这些服务器的提示词不会作为斜杠命令提供。终端会话和 `-p` 会话则会提供。
-- 使用 `--remote` 添加的服务器在远程机器的沙箱内运行。它们只能看到项目和 Claude Code 自身的状态，无法看到远程主目录中的其他内容。
+- 使用 `--remote` 添加的服务器在远程机器的沙箱内运行。它们只能看到项目和 Claude Code 自身的状态，无法看到远程主目录中的其他内容。`claude mcp list` 和 `claude mcp get` 会在沙箱之外，从远程主目录检查它们。
+- 不支持 `claude mcp serve` 和 `claude mcp add-from-claude-desktop`。
+- 不会应用本地机器上的组织 MCP 策略：`managed-mcp.json`，以及托管设置中的 `managedMcpServers`、`allowedMcpServers` 和 `deniedMcpServers`。
 
 <a id="sessions-talking-to-each-other"></a>
 ## 会话间通信

@@ -21,9 +21,9 @@ use tokio_util::sync::CancellationToken;
 use crate::args::ParsedArgs;
 use crate::json::{Object, parse_object, str_field};
 use crate::log::{trace, warn};
-use crate::mcp::bridge::{Bridge, Notify};
+use crate::mcp::bridge::{Bridge, Launch, Notify};
 use crate::mcp::local::LocalTools;
-use crate::mcp::{Endpoint, INTERNAL_ERROR, id_key, rpc_error, rpc_id};
+use crate::mcp::{Endpoint, INTERNAL_ERROR, LocalServer, Source, id_key, rpc_error, rpc_id};
 use crate::names::{EDIT_TOOLS, PREFIX, SERVER, is_local_tool, unprefix};
 use crate::mount::transcripts::TranscriptMirror;
 use crate::mount::workdir::PathMap;
@@ -52,6 +52,32 @@ fn sdk_entry(name: &str, config: &Object) -> Value {
     entry
 }
 
+fn str_field_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+fn elicitation_request(server: &str, params: &Value) -> Value {
+    let mode = str_field_of(params, "mode").unwrap_or("form");
+    let mut request = json!({ "subtype": "elicitation", "mcp_server_name": server, "message": params.get("message").cloned().unwrap_or(json!("")), "mode": mode });
+    if mode == "url" {
+        request["url"] = params.get("url").cloned().unwrap_or(Value::Null);
+        request["elicitation_id"] = params.get("elicitationId").cloned().unwrap_or(Value::Null);
+    } else {
+        let schema = params.get("requestedSchema").cloned().unwrap_or(json!({}));
+        let order: Vec<&String> = schema.get("properties").and_then(Value::as_object).map(|p| p.keys().collect()).unwrap_or_default();
+        request["property_order"] = json!(order);
+        request["requested_schema"] = schema;
+    }
+    if let Some(display) = params.get("_meta").and_then(|m| m.get("anthropic/permissionDisplay")) {
+        for (from, to) in [("title", "title"), ("displayName", "display_name"), ("description", "description")] {
+            if let Some(value) = display.get(from) {
+                request[to] = value.clone();
+            }
+        }
+    }
+    request
+}
+
 fn object_entry<'a>(parent: &'a mut Object, key: &str) -> &'a mut Object {
     if !parent.get(key).is_some_and(Value::is_object) {
         parent.insert(key.to_owned(), json!({}));
@@ -63,7 +89,7 @@ pub struct Relay {
     pub policy: Policy,
     ws: Arc<Workspace>,
     local_tools: Vec<&'static str>,
-    config_server_configs: Vec<(String, Object)>,
+    config_server_configs: Vec<(String, LocalServer)>,
     /// Servers the remote claude starts itself (from its MCP config file); they ride along in every set.
     remote_servers: Vec<(String, Object)>,
     host_mirror: bool,
@@ -79,6 +105,7 @@ pub struct Relay {
     /// Calls claude withdrew with control_cancel_request; they get no answer.
     withdrawn: Mutex<HashSet<String>>,
     own_requests: Arc<AtomicU64>,
+    elicitations: Arc<Mutex<HashMap<String, (String, Value)>>>,
     paths: PathMap,
     mirror: TranscriptMirror,
     env_prompt: EnvPrompt,
@@ -95,7 +122,7 @@ impl Relay {
         to_host: HostOut,
     ) -> Arc<Relay> {
         let local = (!session.local_tools.is_empty()).then(|| Arc::new(LocalTools::new(ws.clone(), &session.local_tools)));
-        let config_server_configs: Vec<(String, Object)> = session.config_servers.iter().filter(|(name, _)| *name != SERVER).map(|(n, c)| (n.clone(), c.clone())).collect();
+        let config_server_configs: Vec<(String, LocalServer)> = session.config_servers.iter().filter(|(name, _)| *name != SERVER).map(|(n, c)| (n.clone(), c.clone())).collect();
         let relay = Arc::new(Relay {
             policy: Policy::new(session.permission_mode.as_deref().unwrap_or("default"), session.bash_allow.clone(), session.bash_deny.clone(), session.tool_allows.clone()),
             local_tools: session.local_tools.clone(),
@@ -107,6 +134,7 @@ impl Relay {
             rpc_calls: Mutex::new(HashMap::new()),
             withdrawn: Mutex::new(HashSet::new()),
             own_requests: Arc::new(AtomicU64::new(0)),
+            elicitations: Arc::default(),
             paths: PathMap::new(&ws.root),
             mirror: TranscriptMirror::new(&ws.root),
             env_prompt,
@@ -120,24 +148,31 @@ impl Relay {
         if let Some(local) = local {
             endpoints.insert(SERVER.to_owned(), Endpoint::Local(local));
         }
-        for (name, config) in &relay.config_server_configs {
-            endpoints.insert(name.clone(), relay.bridge(name, config.clone()));
+        for (name, server) in &relay.config_server_configs {
+            endpoints.insert(name.clone(), relay.bridge(name, server.clone()));
         }
         drop(endpoints);
         relay
     }
 
-    fn bridge(&self, name: &str, config: Object) -> Endpoint {
-        let bridge = Arc::new(Bridge::new(name, config, self.ws.root.clone()));
+    fn bridge(&self, name: &str, server: LocalServer) -> Endpoint {
+        let bridge = Arc::new(Bridge::new(name, server.config, Launch::new(&self.ws.root, &self.ws.extra_dirs, server.source)));
         bridge.set_notify(self.notifier(name));
         Endpoint::Bridge(bridge)
     }
 
-    /// Sends every bridged server notification to claude.
     fn notifier(&self, server: &str) -> Notify {
-        let (to_claude, counter, server) = (self.to_claude.clone(), self.own_requests.clone(), server.to_owned());
+        let (to_claude, to_host, counter, elicitations, server) = (self.to_claude.clone(), self.to_host.clone(), self.own_requests.clone(), self.elicitations.clone(), server.to_owned());
         Arc::new(move |message| {
             let request_id = format!("{OWN_REQUEST}{}", counter.fetch_add(1, Ordering::Relaxed) + 1);
+            if str_field_of(&message, "method") == Some("elicitation/create")
+                && let Some(id) = message.get("id").cloned()
+            {
+                elicitations.lock().unwrap().insert(request_id.clone(), (server.clone(), id));
+                let request = elicitation_request(&server, message.get("params").unwrap_or(&Value::Null));
+                to_host(json!({ "type": "control_request", "request_id": request_id, "request": request }).to_string());
+                return;
+            }
             let frame = json!({ "type": "control_request", "request_id": request_id, "request": { "subtype": "mcp_message", "server_name": server, "message": message } });
             let _ = to_claude.send(frame.to_string());
         })
@@ -189,11 +224,26 @@ impl Relay {
         if kind.as_deref() == Some("control_response")
             && let Some(response) = frame.get_mut("response").and_then(Value::as_object_mut)
             && let Some(id) = str_field(response, "request_id")
-            && self.permission_requests.lock().unwrap().remove(id)
         {
-            crate::peers::set_status(crate::peers::Status::Working);
-            self.rewrite_permission_answer(response);
-            return self.send_rewritten(&frame);
+            if self.permission_requests.lock().unwrap().remove(id) {
+                crate::peers::set_status(crate::peers::Status::Working);
+                self.rewrite_permission_answer(response);
+                return self.send_rewritten(&frame);
+            }
+            let asked = self.elicitations.lock().unwrap().remove(id);
+            if let Some((server, rpc_id)) = asked {
+                let result = match (str_field(response, "subtype"), response.get("response")) {
+                    (Some("success"), Some(answer)) => answer.clone(),
+                    _ => json!({ "action": "cancel" }),
+                };
+                let endpoint = self.endpoints.lock().unwrap().get(&server).cloned();
+                if let Some(endpoint) = endpoint
+                    && let Value::Object(reply) = json!({ "jsonrpc": "2.0", "id": rpc_id, "result": result })
+                {
+                    endpoint.handle(reply, CancellationToken::new()).await;
+                }
+                return;
+            }
         }
         self.send_claude(line)
     }
@@ -238,7 +288,8 @@ impl Relay {
             .local
             .iter()
             .map(|_| SERVER.to_owned())
-            .chain(self.config_server_configs.iter().chain(&self.remote_servers).map(|(n, _)| n.clone()))
+            .chain(self.config_server_configs.iter().map(|(n, _)| n.clone()))
+            .chain(self.remote_servers.iter().map(|(n, _)| n.clone()))
             .collect();
         let mut stale = vec![];
         for (name, config) in servers {
@@ -258,7 +309,7 @@ impl Relay {
                 if let Some(old) = existing {
                     stale.push(old);
                 }
-                let bridge = self.bridge(&name, config.clone());
+                let bridge = self.bridge(&name, LocalServer { config: config.clone(), source: Source::Caller });
                 self.endpoints.lock().unwrap().insert(name.clone(), bridge);
             }
             live.insert(name.clone());
@@ -278,8 +329,8 @@ impl Relay {
         if self.local.is_some() {
             next.insert(SERVER.into(), json!({ "type": "sdk", "name": SERVER, "timeout": TOOL_TIMEOUT }));
         }
-        for (name, config) in &self.config_server_configs {
-            next.insert(name.clone(), sdk_entry(name, config));
+        for (name, server) in &self.config_server_configs {
+            next.insert(name.clone(), sdk_entry(name, &server.config));
         }
         for (name, config) in &self.remote_servers {
             next.insert(name.clone(), Value::Object(config.clone()));

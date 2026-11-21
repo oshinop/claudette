@@ -24,7 +24,7 @@ Claude Code 自带的命令，例如 `claude auth` 或 `claude doctor`，会原�
 <a id="mcp-servers"></a>
 ## MCP server
 
-使用 `claude mcp` 在本地机器上配置 MCP server，写入的文件与本地 claude 相同：用户作用域和本地作用域使用 `~/.claude.json`，项目作用域使用项目中的 `.mcp.json`。这些服务器在本地机器上运行。
+使用 `claude mcp` 在本地机器上配置 MCP server，写入的文件与本地 claude 相同：用户作用域和本地作用域使用 `~/.claude.json`，项目作用域使用项目中的 `.mcp.json`。这些服务器在本地机器上运行，因此本地机器 `localhost` 上的服务器也能使用。
 
 ```sh
 claude mcp add --scope user fs -- npx @modelcontextprotocol/server-filesystem .
@@ -39,7 +39,9 @@ claude mcp remove fs
 claude mcp add --remote --transport http docs https://example.com/mcp -H 'Authorization: Bearer …'
 ```
 
-`claude mcp add-json` 和 `claude mcp get` 也可使用。服务器设置中的 `${VAR}` 会从本地机器的环境中填入，远程服务器也不例外。与 Claude Code 一样，项目 `.mcp.json` 中的服务器会在你批准后启动。
+`claude mcp list` 和 `claude mcp get` 会像 Claude Code 一样检查每个服务器，远程服务器从远程机器上检查。`claude mcp add-json` 和 `claude mcp reset-project-choices` 也可使用。服务器设置中的 `${VAR}` 会从本地机器的环境中填入，远程服务器也不例外。服务器的 `headersHelper` 在本地机器上运行。
+
+项目 `.mcp.json` 中的服务器会在你批准后启动。claudette 不会显示批准提示：`claude mcp add --scope project` 会批准它添加的服务器，其他服务器需要在 `.claude/settings.local.json` 的 `"enabledMcpjsonServers"` 中批准。
 
 <a id="plugins"></a>
 ## 插件

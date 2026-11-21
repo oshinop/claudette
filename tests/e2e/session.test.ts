@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSdkMcpServer, forkSession, tool } from "@anthropic-ai/claude-agent-sdk";
+import { createSdkMcpServer, type ElicitationRequest, forkSession, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { startHttpMcp } from "../fixtures/http-mcp";
 import { installRemoteServer, modelRequests, onRemote, permissions, project, projectKey, remoteDir, resultText, scenario, start, toolUses, until } from "./harness";
@@ -210,6 +210,28 @@ describe("MCP servers", () => {
     const result = await session.turn(`[[scenario:${id}]] where`);
     await session.close();
     expect(resultText(result)).toBe(`stdio-server-on:local cwd:${dir}`);
+  });
+
+  test("a local server's elicitation reaches the host's onElicitation, and the host's answer reaches the server", async () => {
+    const dir = project();
+    const asked: ElicitationRequest[] = [];
+    const id = await scenario([{ tool: "ask", input: {} }, { tool: "roots", input: {} }, { text: "{{last_tool_result}}" }]);
+    const session = start(dir, {
+      env: noToolSearch,
+      canUseTool: permissions().canUseTool,
+      mcpServers: { local: { type: "stdio", command: "bun", args: ["/app/fixtures/stdio-mcp.ts"] } },
+      onElicitation: async (request) => {
+        asked.push(request);
+        return { action: "accept", content: { word: "kumquat" } };
+      },
+    });
+    const result = await session.turn(`[[scenario:${id}]] ask`);
+    await session.close();
+
+    expect(asked).toEqual([{ serverName: "local", message: "Pick a word", mode: "form", requestedSchema: { type: "object", properties: { word: { type: "string" } }, required: ["word"] } } as ElicitationRequest]);
+    const requests = await modelRequests(id);
+    expect(JSON.stringify(requests[1]!.messages.at(-1))).toContain("elicited:accept:kumquat");
+    expect(resultText(result)).toBe(`roots:file://${realpathSync(dir)}`);
   });
 
   test("a local MCP server's resource is listed and read by remote claude", async () => {

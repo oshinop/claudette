@@ -130,11 +130,13 @@ claude mcp list
 claude mcp remove docs
 ```
 
-无法解析的 `~/.claude.json` 会保持原样，而不会被改写。添加服务器时，是否使用 `--remote` 会决定将它移动到两个文件中的哪一个。不支持 `claude mcp serve`、`add-from-claude-desktop` 和 `reset-project-choices`。
+无法解析的 `~/.claude.json` 会保持原样，而不会被改写。与 Claude Code 一样，如果同一作用域中已有同名服务器，无论它在哪个文件中，添加都会失败。`list` 和 `get` 会连接每个服务器后输出 Claude Code 的状态：本地服务器在本机检查，远程服务器通过远程机器上辅助程序的 `probe` 命令检查，所有远程服务器只用一次 ssh 调用。不支持 `claude mcp serve` 和 `add-from-claude-desktop`。
 
 名称冲突时，宿主的服务器优先，其次是 claudette 自己的服务器（本地作用域优先于用户作用域），然后依次是 `~/.claude.json` 的本地作用域、项目的 `.mcp.json`、`~/.claude.json` 的用户作用域。`${VAR}` 和 `${VAR:-default}` 从本机环境展开，远程服务器也一样。
 
-- 本机运行的服务器通过中继或辅助程序提供的 socket 连接到 claude，因此本地机器 `localhost` 上的服务器（T3 Code 会运行一个）也能正常工作，请求头中的令牌始终留在本地机器上。桥接会原样转发 MCP tool、资源、提示词、补全和服务器通知。对于 Streamable HTTP，它还会保持可选的 GET 事件流打开，并在断开后恢复。
+- 本机运行的服务器通过中继或辅助程序提供的 socket 连接到 claude，因此本地机器 `localhost` 上的服务器（T3 Code 会运行一个）也能正常工作，请求头中的令牌始终留在本地机器上。桥接会原样转发 MCP tool、资源、提示词、补全和服务器通知。对于 Streamable HTTP，它还会保持可选的 GET 事件流打开，并在断开后恢复；如果服务器拒绝第一个 POST，则改用同一 URL 上的 SSE。WebSocket 服务器（`"type": "ws"`）也从本机连接。
+- 桥接声明 Claude Code 的客户端能力（根目录、表单和 URL 信息征询）。它自己用会话的本地文件夹回答 `roots/list`。在终端或 `-p` 会话中，信息征询通过 socket 发给 claude；在 SDK 会话中，中继把它作为 Claude Code 的 `elicitation` 控制请求发给宿主，再把宿主的回答交给服务器，宿主回答错误时交给服务器的是 `cancel`。
+- `headersHelper` 在本机按 Claude Code 的方式运行：在 shell 中运行，工作目录为项目文件夹（本地作用域、`.mcp.json`）、`~/.claude`（用户作用域）或插件根目录，最多运行十秒；由仓库或插件提供时不带类似凭据的环境变量；tool 调用得到 401 或 403 后会再次运行。
 - 远程服务器由远程 claude 在沙箱内启动，工作目录为挂载的项目。其定义以仅远程用户可读的文件形式传到远程机器，随本次运行的首批帧发送，结束时移除，绝不出现在命令行上。
 - `.mcp.json` 中的服务器获批后才会运行，正如 Claude Code 会在启动前请求批准一样：批准记录位于 `.claude/settings.local.json` 或 `.claude/settings.json` 的 `enabledMcpjsonServers`（或 `enableAllProjectMcpServers`）中，或 `~/.claude.json` 中该项目的条目中。claudette 会列出尚未批准的服务器。`claude mcp add --scope project` 会批准其添加的服务器。
 - `claude plugin …` 在本机的插件存储上运行 Claude Code 自身的插件命令（参见[插件](#plugins)）。

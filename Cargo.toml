@@ -22,10 +22,12 @@ regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "http2"] }
 russh-sftp = "3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 serde = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 tokio = { version = "1", features = ["rt", "macros", "process", "io-util", "io-std", "net", "fs", "time", "sync", "signal"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tokio-util = "0.7"
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 

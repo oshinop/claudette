@@ -7,6 +7,7 @@ use anyhow::{Context, bail};
 use serde_json::Value;
 
 use crate::json::Object;
+use crate::mcp::{LocalServer, Source};
 use crate::log::warn;
 use crate::names::{LOCAL_TOOLS, PREFIX, REMOTE_TOOLS, UNASKED_TOOLS, is_local_tool};
 
@@ -23,7 +24,7 @@ pub struct ParsedArgs {
     /// The caller asked for transcript mirror frames itself (an SDK host with a sessionStore).
     pub host_mirror: bool,
     /// MCP servers that run here: the caller's `--mcp-config`, then this machine's own configuration.
-    pub config_servers: BTreeMap<String, Object>,
+    pub config_servers: BTreeMap<String, LocalServer>,
     /// MCP servers this machine's configuration places on the remote machine; the remote claude starts them.
     pub remote_servers: BTreeMap<String, Object>,
     /// The caller passed `--strict-mcp-config`: only its own servers, none from configuration.
@@ -151,7 +152,7 @@ pub fn parse_args(argv: &[String], cwd: &Path) -> anyhow::Result<ParsedArgs> {
                     if let Some(servers) = parsed.get("mcpServers").and_then(Value::as_object) {
                         for (server, config) in servers {
                             if let Some(config) = config.as_object() {
-                                p.config_servers.insert(server.clone(), config.clone());
+                                p.config_servers.insert(server.clone(), LocalServer { config: config.clone(), source: Source::Caller });
                             }
                         }
                     }

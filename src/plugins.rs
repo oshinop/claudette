@@ -354,7 +354,7 @@ pub fn add_servers(p: &mut ParsedArgs, plugins: &[Plugin], cwd: &Path) {
             place(&mut config, &env, &cwd.to_string_lossy());
             crate::mcp::config::expand(&mut config);
             if let Value::Object(config) = config {
-                p.config_servers.insert(name, config);
+                p.config_servers.insert(name, crate::mcp::LocalServer { config, source: crate::mcp::Source::Plugin(plugin.root.clone()) });
             }
         }
     }
@@ -406,8 +406,8 @@ mod tests {
         add_servers(&mut args, std::slice::from_ref(&p), Path::new("/work"));
         let root = p.root.to_string_lossy();
         assert_eq!(args.config_servers.keys().collect::<Vec<_>>(), ["plugin_lint_base", "plugin_lint_file", "plugin_lint_inline"]);
-        assert_eq!(Value::Object(args.config_servers["plugin_lint_file"].clone()), json!({ "command": "b", "env": { "P": "/work" } }));
-        assert_eq!(args.config_servers["plugin_lint_inline"]["args"], json!([format!("{root}/s.js"), p.data.to_string_lossy(), "--token=s3cret", "${user_config.missing}"]));
+        assert_eq!(Value::Object(args.config_servers["plugin_lint_file"].config.clone()), json!({ "command": "b", "env": { "P": "/work" } }));
+        assert_eq!(args.config_servers["plugin_lint_inline"].config["args"], json!([format!("{root}/s.js"), p.data.to_string_lossy(), "--token=s3cret", "${user_config.missing}"]));
 
         let callbacks = Callbacks::new(&p.root, "nc");
         let view: Value = serde_json::from_slice(&p.manifest_view(&callbacks)).unwrap();

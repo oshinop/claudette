@@ -44,7 +44,7 @@ async fn run(argv: Vec<String>) -> anyhow::Result<i32> {
     let prefix = config::prefix()?;
     match argv.first().map(String::as_str) {
         Some(first) if first.starts_with(prefix.as_str()) => return commands::run(&first[prefix.len()..], &argv[1..], &prefix, &cwd).await,
-        Some("mcp") => return commands::mcp_command(&argv[1..], &cwd),
+        Some("mcp") => return mcp::cli::run(&argv, &cwd).await,
         Some("plugin" | "plugins") => return run::plugin_command(&Config::load()?, &argv, &cwd).await,
         Some(command @ ("agents" | "attach" | "respawn" | "stop" | "kill" | "rm" | "logs")) => bail!("{}", BACKGROUND.replace("{what}", &format!("`claude {command}`"))),
         _ => {}

@@ -148,11 +148,19 @@ echo "{MISSING} $p""#
 /// For `claudette +doctor`: makes sure the helper for the remote machine is there (copying it as a session
 /// would) and runs; returns the version it reports.
 pub async fn check_helper(config: &Config) -> anyhow::Result<String> {
+    helper_output(config, "version", b"").await
+}
+
+pub async fn helper_output(config: &Config, command: &str, input: &[u8]) -> anyhow::Result<String> {
     let builds = builds();
     let mut uploaded = false;
     loop {
-        let argv = crate::ssh::ssh_argv(config, &helper_script(&builds, "version"), false);
-        let out = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::null()).output().await?;
+        let argv = crate::ssh::ssh_argv(config, &helper_script(&builds, command), false);
+        let mut child = Command::new(&argv[0]).args(&argv[1..]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let mut stdin = child.stdin.take().expect("piped");
+        let _ = stdin.write_all(input).await;
+        drop(stdin);
+        let out = child.wait_with_output().await?;
         let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
         let Some(remote) = text.strip_prefix(MISSING).map(str::trim) else {
             if !out.status.success() {

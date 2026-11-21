@@ -65,6 +65,8 @@ Hosts such as T3 Code and Paseo don't have these; they apply when you run `claud
 - `claude mcp serve` isn't available.
 - The local machine's organization MCP policy isn't applied: `managed-mcp.json`, and
   `managedMcpServers`, `allowedMcpServers` and `deniedMcpServers` in its managed settings.
+- claude.ai connectors (the ones you add at claude.ai) don't load: claudette starts the remote claude
+  with `--strict-mcp-config` to keep the remote machine's own servers out, and that also turns them off.
 
 ## Sessions talking to each other
 

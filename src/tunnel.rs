@@ -4,7 +4,7 @@
 //! - **Deploy.** ssh runs the helper from `~/.claudette/bin/<sha256>/claudette` on the remote
 //!   machine. When that copy is missing, the start command says which platform the machine is, and
 //!   this machine uploads the matching build (this executable, or the release's `claudette-<platform>`
-//!   beside it), checks its sha256 there and renames it into place; the two newest builds are kept.
+//!   beside it), checks its sha256 there and renames it into place.
 //! - **Channels.** claude's stdio (or its terminal) and every connection to the sockets claude reaches
 //!   this machine through travel as channels of the helper's resumable stream.
 //! - **Reconnecting.** When ssh ends without the session having ended, this side reconnects (a new
@@ -180,14 +180,14 @@ pub async fn helper_output(config: &Config, command: &str, input: &[u8]) -> anyh
     }
 }
 
-/// Uploads a build: into a temporary name, checked, then renamed; older builds but one are removed.
+/// Uploads a build: into a temporary name, checked, then renamed.
 async fn upload(config: &Config, build: &Build) -> anyhow::Result<()> {
     let script = format!(
         r#"set -e; D="$HOME/.claudette/bin/{folder}"; mkdir -p "$D"; t="$D/.upload.$$"; cat >"$t"
 s=$( (sha256sum "$t" 2>/dev/null || shasum -a 256 "$t") | cut -d' ' -f1)
 if [ "$s" != {sha} ]; then rm -f "$t"; echo "the uploaded helper does not match its checksum" >&2; exit 1; fi
 chmod 755 "$t"; mv "$t" "$D/claudette"
-cd "$HOME/.claudette/bin" && ls -t | tail -n +3 | while read -r old; do rm -rf -- "$old"; done"#,
+"$D/claudette" __helper prune || true"#,
         folder = build.folder(),
         sha = build.sha,
     );

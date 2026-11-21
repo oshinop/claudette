@@ -80,8 +80,8 @@ loading of subdirectory memory without repeating the files already in the prompt
 Sessions run under the helper: claudette's own binary, run on the remote machine. Nothing is
 installed: on a session's first connection claudette checks for the build for the remote
 machine's platform in `~/.claudette/bin/<sha256 prefix>/claudette` and copies it there if it
-is missing (a temporary name, checked against its checksum, then renamed; the two newest builds are
-kept). A release carries builds for macOS and Linux on arm64 and x86-64 next to the executable, so a
+is missing (a temporary name, checked against its checksum, then renamed). A release carries builds
+for macOS and Linux on arm64 and x86-64 next to the executable, so a
 local Linux machine can drive a Mac and the other way round. `claudette +doctor` makes the same
 check and reports the helper's version.
 
@@ -89,6 +89,13 @@ A session holds its builds open from its start. `claudette +update` renames new 
 so a session that started before reconnects to the helper it started with, and copies that build
 again if the remote machine removed it, rather than a build whose checksum it never took. The next
 session runs the new build on both machines.
+
+Local machines on different versions share the remote machine's `~/.claudette/bin`, each running
+its own build. Each holder keeps a shared lock on its build's folder (`.lock`) while it lives. After
+an upload, the new build prunes the folder: it keeps the two most recently copied builds and any
+build a holder has locked, and removes the rest. If a build is gone all the same (removed by hand,
+or in the moment before a new holder takes its lock), claudette's PreToolUse hook in a terminal or
+`-p` session refuses every call, since it can no longer check your permission rules.
 
 For each run the helper starts a holder, detached from ssh, with its state in
 `/tmp/claudette-<run>.*` (mode 0600, removed at the end). The holder runs claude (on a terminal

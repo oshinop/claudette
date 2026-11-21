@@ -22,6 +22,7 @@
 //! - `__helper sftp <socket> <warm file> [--writeback]`: the remote end of a mount of this machine,
 //!   which answers what it knows without a round trip (see [`near`]).
 
+pub mod builds;
 pub mod config;
 pub mod holder;
 pub mod near;
@@ -73,6 +74,7 @@ pub fn main(args: &[String]) -> i32 {
         (Some("hook"), Some(rules)) if args.len() == 3 => runtime.block_on(holder::hook(rules, &args[2])),
         (Some("config"), _) => runtime.block_on(config::serve(&args[1..])),
         (Some("probe"), None) => runtime.block_on(probe()),
+        (Some("prune"), None) => builds::prune(),
         (Some("open"), Some(socket)) if args.len() == 3 && !args[2].contains('\n') => runtime.block_on(desktop(socket, &format!("open {}", args[2]), false)),
         (Some("copy"), Some(socket)) if args.len() == 2 => runtime.block_on(desktop(socket, "copy", true)),
         (Some("paste"), Some(socket)) if args.len() == 2 => runtime.block_on(desktop(socket, "paste", false)),

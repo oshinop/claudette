@@ -141,7 +141,11 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
         }))?;
         let hook_socket = forwards.add(&hook);
         let rules = forwards.file("bash-rules.json", json!({ "allow": p.bash_allow, "deny": p.bash_deny }).to_string().into_bytes());
-        let pretool = format!("exec \"$CLAUDETTE_HELPER\" __helper hook {} {}", shell_quote(&rules), shell_quote(&hook_socket));
+        let pretool = format!(
+            "[ -x \"$CLAUDETTE_HELPER\" ] || {{ echo 'claudette: the helper is gone from the remote machine, so this call cannot be checked against your permission rules and is refused' >&2; exit 2; }}; exec \"$CLAUDETTE_HELPER\" __helper hook {} {}",
+            shell_quote(&rules),
+            shell_quote(&hook_socket)
+        );
         let notify = format!("exec \"$CLAUDETTE_HELPER\" __helper notify {}", shell_quote(&hook_socket));
         let hooked = with_hook(delivered.settings.take(), &pretool, &notify, &p.ask_tools);
         let settings = crate::settings::session_settings(Some(hooked));

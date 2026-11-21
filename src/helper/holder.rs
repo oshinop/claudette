@@ -119,6 +119,7 @@ const EXITED_DETACH_TIMEOUT: u64 = 600;
 /// The holder: serves the run until the session ends and the local machine has heard, the local machine says
 /// goodbye, or the local machine stays away longer than the detach timeout.
 pub async fn hold(run: &str) -> i32 {
+    let _build = super::builds::hold();
     // Everything the holder makes is for this user only.
     nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o077));
     let path = control_path(run);

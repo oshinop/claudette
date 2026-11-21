@@ -106,4 +106,41 @@ describe("the session helper", () => {
       await a.close();
     }
   });
+
+  const twoCalls = async (dir: string) => {
+    const id = await scenario([
+      { tool: "Bash", input: { command: "sleep 6; echo first", description: "wait" } },
+      { tool: "Bash", input: { command: "echo second", description: "again" } },
+      { text: "result={{last_tool_result}} error={{last_tool_error}}" },
+    ]);
+    const run = Bun.spawn(["claudette", "-p", `[[scenario:${id}]] go`, "--output-format", "json", "--allowedTools", "Bash"], { cwd: dir, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    expect(await until(() => holdersOnRemote() === "1", 15_000)).toBe(true);
+    await Bun.sleep(1_500);
+    return async () => {
+      expect(await run.exited).toBe(0);
+      return String(JSON.parse(await new Response(run.stdout).text()).result);
+    };
+  };
+
+  test("another version's upload keeps the build a running session uses, and removes it once the session has ended", async () => {
+    const dir = project();
+    const done = await twoCalls(dir);
+    const build = onRemote("ls ~/.claudette/bin");
+    onRemote(
+      `cd ~/.claudette/bin && mkdir old newer1 newer2 && cp ${build}/claudette old/ && touch -d 2020-01-01 old/claudette && sleep 1 && cp ${build}/claudette newer1/ && cp ${build}/claudette newer2/ && touch newer1/claudette newer2/claudette && newer2/claudette __helper prune`,
+    );
+    expect(onRemote("ls ~/.claudette/bin").split("\n").sort()).toEqual([build, "newer1", "newer2"].sort());
+    expect(await done()).toBe("result=second error=false");
+    expect(await until(() => holdersOnRemote() === "0", 5_000)).toBe(true);
+    onRemote("~/.claudette/bin/newer2/claudette __helper prune");
+    expect(onRemote("ls ~/.claudette/bin").split("\n").sort()).toEqual(["newer1", "newer2"]);
+    onRemote("rm -rf ~/.claudette/bin");
+  });
+
+  test("with its build gone all the same, the permission hook refuses every call", async () => {
+    const dir = project();
+    const done = await twoCalls(dir);
+    onRemote("rm -rf ~/.claudette/bin");
+    expect(await done()).toContain("the helper is gone from the remote machine, so this call cannot be checked against your permission rules and is refused");
+  });
 });

@@ -37,10 +37,6 @@ pub fn kill_all_commands() {
     }
 }
 
-pub fn track_group(pid: u32) {
-    GROUPS.lock().unwrap().insert(pid);
-}
-
 /// Drops the groups nothing runs in any more. Their ids get reused, by any process of this user, so
 /// a group kept after its last process ended could later stop a stranger's.
 fn forget_ended_groups() {

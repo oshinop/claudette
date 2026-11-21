@@ -379,8 +379,8 @@ through the proxy and sends loopback addresses through it too (`--proxy-bypass-l
 WebRTC sends no UDP outside the proxy, and QUIC, background networking, component updates, sync and crash
 reports are off. Firefox gets the same through `user.js`: remote DNS through the proxy, DNS over
 HTTPS off, the proxy for `localhost`, no direct failover, WebRTC, prefetching, HTTP/3 and telemetry
-off. The proxy belongs to the session that started it and stops when that session ends; the next
-link starts it again.
+off. Every session that opens a link records itself in the profile (`claudette-sessions/<pid>`,
+under a lock); the proxy stops when the last of them ends, and the next link starts it again.
 
 ## SDK relay
 

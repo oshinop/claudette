@@ -1,8 +1,15 @@
+use std::fs::File;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
+
+use nix::errno::Errno;
+use nix::fcntl::{Flock, FlockArg};
+use nix::sys::signal::{Signal, kill, killpg};
+use nix::unistd::Pid;
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,6 +19,11 @@ use crate::config::{Config, claudette_dir};
 
 const PROXY_START: Duration = Duration::from_secs(15);
 const PROXY_CHECK: Duration = Duration::from_secs(1);
+const PROXY_PORT: &str = "claudette-proxy-port";
+const PROXY_PID: &str = "claudette-proxy-pid";
+const SESSIONS: &str = "claudette-sessions";
+
+static JOINED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Family {
@@ -142,6 +154,61 @@ fn free_port() -> Result<u16, String> {
     std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).map(|a| a.port()).map_err(|e| format!("no free local port for the browser's proxy: {e}"))
 }
 
+fn locked(profile: &Path) -> std::io::Result<Flock<File>> {
+    let file = File::options().create(true).truncate(false).write(true).open(profile.join("claudette-lock"))?;
+    Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, e)| e.into())
+}
+
+fn join(profile: &Path) -> Result<(), String> {
+    let mut joined = JOINED.lock().unwrap();
+    if joined.iter().any(|p| p == profile) {
+        return Ok(());
+    }
+    let fail = |e: std::io::Error| format!("could not record this session in {}: {e}", profile.display());
+    let _lock = locked(profile).map_err(fail)?;
+    let dir = profile.join(SESSIONS);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(fail)?;
+    std::fs::write(dir.join(std::process::id().to_string()), "").map_err(fail)?;
+    joined.push(profile.to_owned());
+    Ok(())
+}
+
+fn running(pid: i32) -> bool {
+    matches!(kill(Pid::from_raw(pid), None), Ok(()) | Err(Errno::EPERM))
+}
+
+pub fn release() {
+    for profile in JOINED.lock().unwrap().drain(..) {
+        let Ok(_lock) = locked(&profile) else { continue };
+        let dir = profile.join(SESSIONS);
+        let _ = std::fs::remove_file(dir.join(std::process::id().to_string()));
+        let mut others = false;
+        for pid in std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok()) {
+            if running(pid) {
+                others = true;
+            } else {
+                let _ = std::fs::remove_file(dir.join(pid.to_string()));
+            }
+        }
+        if !others {
+            stop_proxy(&profile);
+        }
+    }
+}
+
+fn stop_proxy(profile: &Path) {
+    let read = |name| std::fs::read_to_string(profile.join(name)).ok().and_then(|s| s.trim().parse::<i32>().ok());
+    let (Some(pid), Some(port)) = (read(PROXY_PID), read(PROXY_PORT)) else { return };
+    let _ = std::fs::remove_file(profile.join(PROXY_PID));
+    let still_ours = std::process::Command::new("ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&format!(" -D 127.0.0.1:{port} ")));
+    if still_ours {
+        let _ = killpg(Pid::from_raw(pid), Signal::SIGTERM);
+    }
+}
+
 pub struct Browser {
     config: Config,
     starting: tokio::sync::Mutex<()>,
@@ -160,7 +227,7 @@ impl Browser {
     }
 
     fn port(profile: &Path) -> Result<u16, String> {
-        let file = profile.join("claudette-proxy-port");
+        let file = profile.join(PROXY_PORT);
         if let Some(port) = std::fs::read_to_string(&file).ok().and_then(|s| s.trim().parse().ok()) {
             return Ok(port);
         }
@@ -169,7 +236,7 @@ impl Browser {
         Ok(port)
     }
 
-    async fn proxy(&self, port: u16) -> Result<(), String> {
+    async fn proxy(&self, profile: &Path, port: u16) -> Result<(), String> {
         let _held = self.starting.lock().await;
         if socks_ready(port).await {
             return Ok(());
@@ -187,9 +254,7 @@ impl Browser {
             .process_group(0)
             .spawn()
             .map_err(|e| format!("could not start ssh for the browser's proxy: {e}"))?;
-        if let Some(pid) = child.id() {
-            crate::tools::track_group(pid);
-        }
+        let pid = child.id().unwrap_or(0);
         let deadline = tokio::time::Instant::now() + PROXY_START;
         while tokio::time::Instant::now() < deadline {
             if let Ok(Some(status)) = child.try_wait() {
@@ -200,7 +265,7 @@ impl Browser {
                 return Err(format!("ssh could not open the browser's proxy to {} ({status}): {}", self.config.host, err.trim()));
             }
             if socks_ready(port).await {
-                return Ok(());
+                return std::fs::write(profile.join(PROXY_PID), pid.to_string()).map_err(|e| format!("could not save the proxy's process id: {e}"));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -213,7 +278,8 @@ impl Browser {
         let (program, family) = find().ok_or("no supported browser on this machine: install Google Chrome, Chromium, Brave, Microsoft Edge or Firefox; nothing was opened")?;
         let profile = self.profile(family)?;
         let port = Self::port(&profile)?;
-        self.proxy(port).await?;
+        join(&profile)?;
+        self.proxy(&profile, port).await?;
         let args = match family {
             Family::Chromium => chromium_args(&profile, port, url.as_str()),
             Family::Firefox => {

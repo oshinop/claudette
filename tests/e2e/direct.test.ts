@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { installRemoteServer, MOCK_API, modelRequests, onRemote, project, projectKey, remoteDir, scenario, start, until } from "./harness";
+import { installRemoteServer, MOCK_API, modelRequests, onRemote, project, projectKey, remoteDir, scenario, start, type Step, until } from "./harness";
 
 /** claudette used the way a person (or T3 Code's text generation) uses claude: one -p run. */
 function claude(dir: string, args: string[], env: Record<string, string> = {}) {
@@ -443,8 +443,47 @@ describe("links the remote claude opens", () => {
       expect(opened.page).toBe(`served-by:${onRemote("hostname")}/callback`);
       expect(opened.args).toContain(`--user-data-dir=${join(homedir(), ".config/claudette/browser")}/chromium-${new Bun.CryptoHasher("sha256").update("remote").digest("hex").slice(0, 12)}`);
       expect(opened.args).toContain("--webrtc-ip-handling-policy=disable_non_proxied_udp");
-      expect(await until(() => Bun.spawnSync(["pgrep", "-f", "-- -D 127.0.0.1:"]).stdout.toString().trim() === "", 5_000)).toBe(true);
+      expect(await until(() => Bun.spawnSync(["pgrep", "-f", "--", "-D 127.0.0.1:"]).stdout.toString().trim() === "", 5_000)).toBe(true);
       expect(await leftoverSockets()).toBe("0");
+    } finally {
+      mcp(dir, "remove", "opener");
+      onRemote("pkill -f 'listen(8765'");
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  test("the proxy outlives the session that started it while another session to the same machine still runs", async () => {
+    const server = installRemoteServer();
+    onRemote(`nohup node -e 'require("http").createServer((q, r) => r.end("served-by:" + require("os").hostname() + q.url)).listen(8765, "127.0.0.1")' >/dev/null 2>&1 &`);
+    const bin = mkdtempSync(join(tmpdir(), "bin-"));
+    writeFileSync(join(bin, "chromium"), FAKE_CHROMIUM, { mode: 0o755 });
+    const dir = project();
+    const proxy = () => Bun.spawnSync(["pgrep", "-f", "--", "-D 127.0.0.1:"]).stdout.toString().trim();
+    const session = async (name: string, steps: Step[]) => {
+      const id = await scenario([...steps, { text: `${name} done` }]);
+      return Bun.spawn(["claudette", "-p", `[[scenario:${id}]] go`, "--output-format", "json", "--allowedTools", "mcp__opener__open", "Bash"], {
+        cwd: dir,
+        env: { ...process.env, ENABLE_TOOL_SEARCH: "false", PATH: `${bin}:${process.env.PATH}`, FAKE_BROWSER_OUT: join(bin, `${name}.json`) },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    };
+    try {
+      expect(mcp(dir, "add", "--remote", "--", "opener", "node", server).code).toBe(0);
+      const first = await session("first", [{ tool: "open", input: { url: "http://localhost:8765/first" } }, { tool: "Bash", input: { command: "sleep 2", description: "wait" } }]);
+      expect(await until(() => existsSync(join(bin, "first.json")), 15_000)).toBe(true);
+      const started = proxy();
+      expect(started).not.toBe("");
+      const second = await session("second", [{ tool: "open", input: { url: "http://localhost:8765/second" } }, { tool: "Bash", input: { command: "sleep 8", description: "wait" } }]);
+      expect(await until(() => existsSync(join(bin, "second.json")), 15_000)).toBe(true);
+      expect(await first.exited).toBe(0);
+      expect(proxy()).toBe(started);
+      expect(await second.exited).toBe(0);
+      expect(await until(() => proxy() === "", 5_000)).toBe(true);
+      for (const name of ["first", "second"]) {
+        expect(JSON.parse(readFileSync(join(bin, `${name}.json`), "utf8")).page).toBe(`served-by:${onRemote("hostname")}/${name}`);
+      }
     } finally {
       mcp(dir, "remove", "opener");
       onRemote("pkill -f 'listen(8765'");

@@ -76,7 +76,8 @@ through the remote machine: `localhost` in that window is the remote machine's, 
 and sites see the remote machine's address. claudette uses Google Chrome, Chromium, Brave, Microsoft
 Edge or Firefox, with its own profile for each remote machine in `~/.config/claudette/browser`, so
 the window has none of your everyday browser's cookies or extensions. Only `http` and `https` links
-open. The window reaches the remote machine while the session that opened it runs.
+open. The window reaches the remote machine while any session that opened a link to that machine
+is running.
 
 ## Sessions talking to each other
 

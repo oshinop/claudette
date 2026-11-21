@@ -77,5 +77,6 @@ fn main() {
         1
     });
     kill_all_commands();
+    browser::release();
     std::process::exit(code);
 }

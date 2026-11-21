@@ -55,7 +55,8 @@ Hosts such as T3 Code and Paseo don't have these; they apply when you run `claud
 
 ## MCP servers
 
-- Servers that run on the local machine can't complete an OAuth login.
+- Sign in to an OAuth server with `claude mcp login`; `/mcp` in a session can't do it. A server you
+  add with `--remote` can't sign in at all.
 - In SDK hosts such as T3 Code, those servers' prompts aren't offered as slash commands. Terminal
   and `-p` sessions do offer them.
 - Servers you add with `--remote` run on the remote machine inside the sandbox. They see the project

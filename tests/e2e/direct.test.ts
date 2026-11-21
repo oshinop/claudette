@@ -269,6 +269,52 @@ describe("MCP servers: all configured on the local machine, each running where i
     }
   });
 
+  test("an OAuth server signs in on the local machine with claude mcp login, its tool calls carry the token, and logout signs out", async () => {
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const example = "/app/node_modules/@modelcontextprotocol/sdk/dist/esm/examples/server/simpleStreamableHttp.js";
+    const server = Bun.spawn(["bun", example, "--oauth"], { env: { ...process.env, MCP_PORT: String(port), MCP_AUTH_PORT: String(port + 1) }, stdout: "pipe", stderr: "ignore" });
+    try {
+      const url = `http://localhost:${port}/mcp`;
+      const logs = server.stdout.getReader();
+      let started = "";
+      while (!started.includes(`MCP Streamable HTTP Server listening on port ${port}`)) {
+        const chunk = await logs.read();
+        if (chunk.done) throw new Error(`the OAuth example server did not start: ${started}`);
+        started += new TextDecoder().decode(chunk.value);
+      }
+      void (async () => {
+        while (!(await logs.read()).done);
+      })();
+      const dir = project();
+      expect(mcp(dir, "add", "--transport", "http", "demo", url).code).toBe(0);
+      expect(mcp(dir, "list").out).toContain(`demo: ${url} (HTTP) - ! Needs authentication`);
+
+      const login = Bun.spawn(["claudette", "mcp", "login", "demo", "--no-browser"], { cwd: dir, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+      const reader = login.stdout.getReader();
+      let printed = "";
+      while (!/https?:\/\/\S+authorize\S+/.test(printed)) printed += new TextDecoder().decode((await reader.read()).value);
+      const authorize = printed.match(/https?:\/\/\S+authorize\S+/)![0];
+      await fetch(authorize);
+      while (!printed.includes("Authenticated")) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        printed += new TextDecoder().decode(chunk.value);
+      }
+      expect(await login.exited, printed).toBe(0);
+      expect(printed).toContain('Authenticated with "demo". Its tools are now available in Claude Code.');
+      expect(mcp(dir, "list").out).toContain(`demo: ${url} (HTTP) - ✔ Connected`);
+
+      const id = await scenario([{ tool: "greet", input: { name: "quince" } }, { text: "{{last_tool_result}}" }]);
+      const run = claude(dir, ["-p", `[[scenario:${id}]] greet`, "--output-format", "json", "--allowedTools", "mcp__demo__greet"], { ENABLE_TOOL_SEARCH: "false" });
+      expect(run.result.result, run.out).toContain("quince");
+
+      expect(mcp(dir, "logout", "demo").out).toBe('Signed out of "demo". Run `claude mcp login demo` to authenticate again.\n');
+      expect(mcp(dir, "list").out).toContain(`demo: ${url} (HTTP) - ! Needs authentication`);
+    } finally {
+      server.kill();
+    }
+  });
+
   test("user and local scope land in the local machine's ~/.claude.json, where a local claude keeps them, and the server runs", async () => {
     const claudeJson = join(homedir(), ".claude.json");
     const before = existsSync(claudeJson) ? readFileSync(claudeJson, "utf8") : undefined;

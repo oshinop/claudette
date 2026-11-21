@@ -137,6 +137,7 @@ claude mcp remove docs
 - 本机运行的服务器通过中继或辅助程序提供的 socket 连接到 claude，因此本地机器 `localhost` 上的服务器（T3 Code 会运行一个）也能正常工作，请求头中的令牌始终留在本地机器上。桥接会原样转发 MCP tool、资源、提示词、补全和服务器通知。对于 Streamable HTTP，它还会保持可选的 GET 事件流打开，并在断开后恢复；如果服务器拒绝第一个 POST，则改用同一 URL 上的 SSE。WebSocket 服务器（`"type": "ws"`）也从本机连接。
 - 桥接声明 Claude Code 的客户端能力（根目录、表单和 URL 信息征询）。它自己用会话的本地文件夹回答 `roots/list`。在终端或 `-p` 会话中，信息征询通过 socket 发给 claude；在 SDK 会话中，中继把它作为 Claude Code 的 `elicitation` 控制请求发给宿主，再把宿主的回答交给服务器，宿主回答错误时交给服务器的是 `cancel`。
 - `headersHelper` 在本机按 Claude Code 的方式运行：在 shell 中运行，工作目录为项目文件夹（本地作用域、`.mcp.json`）、`~/.claude`（用户作用域）或插件根目录，最多运行十秒；由仓库或插件提供时不带类似凭据的环境变量；tool 调用得到 401 或 403 后会再次运行。
+- OAuth 也在本机运行，借助 `rmcp` 的授权支持：从服务器的 401 质询开始发现，除非 `oauth.clientId` 指定了客户端，否则进行动态客户端注册，使用 PKCE，以服务器的 URL 作为 `resource`，回调在本机回环地址的随机端口或 `oauth.callbackPort` 上接收。服务器的令牌、注册信息和客户端密钥保存在 `~/.config/claudette/mcp-oauth/<sha256>.json`（`0600`）中，按作用域、项目、名称、URL 和客户端 id 区分，因此以其他 URL 重新添加的服务器会重新开始。只有当服务器的 `headers` 和 `headersHelper` 都没有提供 `Authorization` 时，桥接才会发送令牌；令牌过期或调用得到 401 时会刷新，并重试该调用一次。
 - 远程服务器由远程 claude 在沙箱内启动，工作目录为挂载的项目。其定义以仅远程用户可读的文件形式传到远程机器，随本次运行的首批帧发送，结束时移除，绝不出现在命令行上。
 - `.mcp.json` 中的服务器获批后才会运行，正如 Claude Code 会在启动前请求批准一样：批准记录位于 `.claude/settings.local.json` 或 `.claude/settings.json` 的 `enabledMcpjsonServers`（或 `enableAllProjectMcpServers`）中，或 `~/.claude.json` 中该项目的条目中。claudette 会列出尚未批准的服务器。`claude mcp add --scope project` 会批准其添加的服务器。
 - `claude plugin …` 在本机的插件存储上运行 Claude Code 自身的插件命令（参见[插件](#plugins)）。

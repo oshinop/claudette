@@ -1,10 +1,12 @@
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, ensure};
 use serde_json::{Value, json};
 
-use super::bridge::{Health, Launch, probe};
+use super::bridge::{Health, Launch, configured_headers, probe};
 use super::config::{self as mcp, Approval, Place, Removal, Scope, Server};
+use super::oauth;
 use crate::config::Config;
 use crate::json::Object;
 
@@ -24,13 +26,15 @@ pub async fn run(argv: &[String], cwd: &Path) -> anyhow::Result<i32> {
         "add" => add(rest, cwd, false),
         "add-json" => add(rest, cwd, true),
         "remove" => remove(rest, cwd),
+        "login" => login(rest, cwd).await,
+        "logout" => logout(rest, cwd),
         "reset-project-choices" => {
             mcp::reset_choices(cwd)?;
             println!("Project-scoped (.mcp.json) server approvals and rejections stored for this project have been reset.");
             println!("Servers in .mcp.json start again once you approve them in .claude/settings.local.json.");
             Ok(0)
         }
-        "serve" | "add-from-claude-desktop" | "login" | "logout" => fail(format!("`claude mcp {}` is not available with claudette", args[0])),
+        "serve" | "add-from-claude-desktop" => fail(format!("`claude mcp {}` is not available with claudette", args[0])),
         other => fail(format!("error: unknown command '{other}'")),
     }
 }
@@ -38,6 +42,60 @@ pub async fn run(argv: &[String], cwd: &Path) -> anyhow::Result<i32> {
 fn fail(message: impl std::fmt::Display) -> anyhow::Result<i32> {
     eprintln!("{message}");
     Ok(1)
+}
+
+async fn login(args: &[String], cwd: &Path) -> anyhow::Result<i32> {
+    let (mut name, mut no_browser) = (None, false);
+    for arg in args {
+        match arg.as_str() {
+            "--no-browser" => no_browser = true,
+            flag if flag.starts_with('-') => return fail(format!("error: unknown option '{flag}'")),
+            value if name.is_none() => name = Some(value),
+            _ => return fail("error: too many arguments for 'login'"),
+        }
+    }
+    let Some(name) = name else { return fail("error: missing required argument 'name'") };
+    println!("Starting authentication for \"{name}\"…");
+    let result = async {
+        let servers = mcp::servers(cwd, true);
+        let server = servers.iter().find(|server| server.name == name).context("no MCP server with that name")?;
+        ensure!(server.place == Place::Here, "this server runs remotely; login is only available for servers running on this machine");
+        ensure!(server.approval == Approval::Approved, "approve this MCP server before logging in");
+        let store = oauth::Store::new(name, &server.config, cwd, &server.source).context("OAuth login requires an HTTP or SSE MCP server with a URL")?;
+        let url = server.config.get("url").and_then(Value::as_str).context("server has no URL")?;
+        let launch = Launch::new(cwd, &[], server.source.clone());
+        let headers = configured_headers(name, &server.config, url, &launch).await.map_err(anyhow::Error::msg)?;
+        store.login(&server.config, &headers, no_browser).await
+    }.await;
+    if let Err(error) = result {
+        return fail(format!("Couldn't complete authentication for \"{name}\": {error:#}"));
+    }
+    println!("Authenticated with \"{name}\". Its tools are now available in Claude Code.");
+    Ok(0)
+}
+
+fn logout(args: &[String], cwd: &Path) -> anyhow::Result<i32> {
+    let [name] = args else { return fail("error: expected one argument 'name'") };
+    let servers = mcp::servers(cwd, true);
+    let Some(server) = servers.iter().find(|server| &server.name == name) else { return fail(format!("No MCP server named \"{name}\".")) };
+    if server.place == Place::Here
+        && let Some(store) = oauth::Store::new(name, &server.config, cwd, &server.source)
+    {
+        store.clear()?;
+    }
+    println!("Signed out of \"{name}\". Run `claude mcp login {name}` to authenticate again.");
+    Ok(0)
+}
+
+fn read_client_secret() -> anyhow::Result<String> {
+    let secret = match std::env::var("MCP_CLIENT_SECRET") {
+        Ok(secret) => secret,
+        Err(std::env::VarError::NotPresent) if std::io::stdin().is_terminal() => rpassword::prompt_password("OAuth client secret: ")?,
+        Err(std::env::VarError::NotPresent) => anyhow::bail!("set MCP_CLIENT_SECRET when --client-secret is used without a terminal"),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("MCP_CLIENT_SECRET must contain valid UTF-8"),
+    };
+    ensure!(!secret.is_empty(), "OAuth client secret cannot be empty");
+    Ok(secret)
 }
 
 fn kind(config: &Object) -> &str {
@@ -246,7 +304,8 @@ fn parse_add(args: &[String], as_json: bool) -> Result<AddArgs, String> {
             "-t" | "--transport" if !as_json => parsed.transport = value("-t, --transport <transport>")?,
             "--client-id" if !as_json => parsed.client_id = Some(value("--client-id <clientId>")?),
             "--callback-port" if !as_json => parsed.callback_port = Some(value("--callback-port <port>")?),
-            "--client-secret" => parsed.client_secret = true,
+            "--client-secret" if inline.is_none() => parsed.client_secret = true,
+            "--client-secret" => return Err("--client-secret takes no value; use MCP_CLIENT_SECRET or the terminal prompt".into()),
             "--remote" => parsed.remote = true,
             "-e" | "--env" | "-H" | "--header" if !as_json => {
                 let target = if flag.starts_with("-e") || flag == "--env" { &mut parsed.env } else { &mut parsed.headers };
@@ -281,9 +340,6 @@ fn add(args: &[String], cwd: &Path, as_json: bool) -> anyhow::Result<i32> {
     let Some(target) = parsed.positional.get(1).cloned() else {
         return fail(if as_json { "error: missing required argument 'json'" } else { "error: missing required argument 'commandOrUrl'" });
     };
-    if parsed.client_secret {
-        return fail("--client-secret is not available with claudette");
-    }
     let config = if as_json {
         let text = if target == "-" {
             let mut text = String::new();
@@ -307,7 +363,37 @@ fn add(args: &[String], cwd: &Path, as_json: bool) -> anyhow::Result<i32> {
         return fail(format!("MCP server {name} already exists in {} config", scope.name()));
     }
     let place = if parsed.remote { Place::Remote } else { Place::Here };
+    let secret = if parsed.client_secret {
+        if place == Place::Remote || !oauth::supports(&config) {
+            return fail("--client-secret requires an HTTP or SSE MCP server that runs on this machine");
+        }
+        if parsed.positional.len() > 2 {
+            return fail("--client-secret takes no value; use MCP_CLIENT_SECRET or the terminal prompt");
+        }
+        let mut expanded = Value::Object(config.clone());
+        mcp::expand(&mut expanded);
+        let expanded = expanded.as_object().context("invalid MCP server configuration")?;
+        if oauth::client_id(expanded).is_none() {
+            return fail("--client-secret requires an OAuth client ID");
+        }
+        let store = oauth::Store::for_scope(&name, expanded, cwd, scope).context("OAuth client secret requires an MCP server URL")?;
+        let secret = match read_client_secret() {
+            Ok(secret) => secret,
+            Err(error) => return fail(error),
+        };
+        Some((store, secret))
+    } else {
+        None
+    };
     let file = mcp::add(cwd, scope, &name, config.clone(), place)?;
+    if let Some((store, secret)) = secret {
+        if let Err(error) = store.set_client_secret(secret) {
+            if let Err(rollback) = mcp::remove(cwd, Some(scope), &name) {
+                return fail(format!("Could not store the OAuth client secret: {error:#}; could not remove the server configuration: {rollback:#}"));
+            }
+            return fail(format!("Could not store the OAuth client secret: {error:#}"));
+        }
+    }
     let file = if scope == Scope::Project { PathBuf::from(mcp::project_key(cwd)).join(".mcp.json") } else { file };
     let url = config.get("url").and_then(Value::as_str).unwrap_or("");
     match (as_json, kind(&config)) {
@@ -388,6 +474,9 @@ fn json_config(text: &str) -> Result<Object, String> {
     let Ok(Value::Object(mut config)) = serde_json::from_str::<Value>(text) else {
         return Err("Invalid configuration: not a JSON object. Check its quotes, commas and braces.".into());
     };
+    if config.get("oauth").and_then(|value| value.get("clientSecret")).is_some() {
+        return Err("Do not put OAuth client secrets in JSON; use --client-secret".into());
+    }
     let required = match config.get("type").and_then(Value::as_str) {
         None | Some("stdio") => "command",
         Some("streamable-http") => {

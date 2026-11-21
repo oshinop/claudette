@@ -355,7 +355,15 @@ pub fn remove(cwd: &Path, scope: Option<Scope>, name: &str) -> anyhow::Result<Re
     let Some(first) = files.first().cloned() else { return Ok(Removal::Missing) };
     for file in files {
         let mut root = read_for_change(&file)?;
-        scope_servers(&mut root, scope, cwd).remove(name);
+        let removed = scope_servers(&mut root, scope, cwd).remove(name);
+        if let Some(mut removed) = removed
+            && !(file == claudette_file() && removed.get("runOn").and_then(Value::as_str) == Some("remote"))
+        {
+            expand(&mut removed);
+            if let Some(store) = removed.as_object().and_then(|config| super::oauth::Store::for_scope(name, config, cwd, scope)) {
+                store.clear()?;
+            }
+        }
         write_pretty(&file, &root)?;
     }
     Ok(Removal::Removed(scope, first))

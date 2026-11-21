@@ -300,6 +300,13 @@ On a name clash the host's servers win, then claudette's own (local scope over u
   scope, `.mcp.json`), `~/.claude` (user scope) or the plugin's root, for at most ten seconds, without
   credential-like variables when a repository or plugin supplied it, and again after a tool call
   answered 401 or 403.
+- OAuth runs here too, through `rmcp`'s authorization support: discovery from the server's 401
+  challenge, dynamic client registration unless `oauth.clientId` names a client, PKCE, the server's URL
+  as the `resource`, and a loopback callback on a random port or `oauth.callbackPort`. A server's
+  tokens, registration and client secret live in `~/.config/claudette/mcp-oauth/<sha256>.json`
+  (`0600`), keyed by scope, project, name, URL and client id, so a server added again at another URL
+  starts over. The bridge sends the token only when the server's `headers` and `headersHelper` give no
+  `Authorization`, refreshes it when it expires or a call gets 401, and retries that call once.
 - Remote servers are started by the remote claude, inside its sandbox, with their working directory in
   the mounted project. Their definitions reach the remote machine as a file only the remote user can
   read, sent with the run's first frames and removed at the end, never on a command line.

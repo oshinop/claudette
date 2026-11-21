@@ -43,6 +43,8 @@ claude mcp add --remote --transport http docs https://example.com/mcp -H 'Author
 
 项目 `.mcp.json` 中的服务器会在你批准后启动。claudette 不会显示批准提示：`claude mcp add --scope project` 会批准它添加的服务器，其他服务器需要在 `.claude/settings.local.json` 的 `"enabledMcpjsonServers"` 中批准。
 
+需要 OAuth 登录的服务器会显示 `! Needs authentication`。使用 `claude mcp login <名称>` 登录：浏览器在本地机器上打开（或者使用 `--no-browser`，由你粘贴重定向 URL），令牌保存在本地机器的 `~/.config/claudette/mcp-oauth` 中。`claude mcp add` 的 `--client-id`、`--client-secret` 和 `--callback-port` 与 Claude Code 中的用法相同，`claude mcp logout` 用于退出登录。
+
 <a id="plugins"></a>
 ## 插件
 

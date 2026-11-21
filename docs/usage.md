@@ -55,6 +55,12 @@ A project's `.mcp.json` servers start once you approve them. claudette shows no 
 `claude mcp add --scope project` approves the server it adds, and you approve others with
 `"enabledMcpjsonServers"` in `.claude/settings.local.json`.
 
+A server that needs an OAuth sign-in shows `! Needs authentication`. Sign in with
+`claude mcp login <name>`: the browser opens on the local machine (or, with `--no-browser`, you paste
+the redirect URL), and the tokens stay on the local machine, in `~/.config/claudette/mcp-oauth`.
+`--client-id`, `--client-secret` and `--callback-port` on `claude mcp add` work as in Claude Code, and
+`claude mcp logout` signs out.
+
 ## Plugins
 
 `claude plugin install`, `claude plugin marketplace add` and the other plugin commands work on the

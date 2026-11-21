@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http;
 use tokio_util::sync::CancellationToken;
 
-use super::{INTERNAL_ERROR, LATEST_PROTOCOL_VERSION, Source, rpc_error, rpc_id, rpc_result};
+use super::{INTERNAL_ERROR, LATEST_PROTOCOL_VERSION, Source, oauth, rpc_error, rpc_id, rpc_result};
 use crate::json::Object;
 use crate::VERSION;
 
@@ -149,7 +149,7 @@ async fn run_helper(name: &str, command: &str, url: &str, launch: &Launch) -> Re
     }
 }
 
-async fn headers(name: &str, config: &Object, url: &str, launch: &Launch) -> Result<Vec<(String, String)>, Failure> {
+pub(super) async fn configured_headers(name: &str, config: &Object, url: &str, launch: &Launch) -> Result<Vec<(String, String)>, Failure> {
     let mut headers = string_map(config.get("headers"));
     if let Some(command) = config.get("headersHelper").and_then(Value::as_str) {
         for (key, value) in run_helper(name, command, url, launch).await? {
@@ -158,6 +158,34 @@ async fn headers(name: &str, config: &Object, url: &str, launch: &Launch) -> Res
         }
     }
     Ok(headers)
+}
+
+fn has_authorization(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+}
+
+fn auth_failure(name: &str, error: anyhow::Error) -> Failure {
+    format!("{error:#}. Run `claude mcp login {name}` to authenticate").into()
+}
+
+async fn headers(name: &str, config: &Object, url: &str, launch: &Launch) -> Result<Vec<(String, String)>, Failure> {
+    let mut headers = configured_headers(name, config, url, launch).await?;
+    if !has_authorization(&headers)
+        && let Some(store) = oauth::Store::new(name, config, launch.cwd(), &launch.source)
+        && let Some(token) = store.access_token().await.map_err(|err| auth_failure(name, err))?
+    {
+        headers.push(("authorization".into(), format!("Bearer {token}")));
+    }
+    Ok(headers)
+}
+
+async fn refresh_oauth(name: &str, config: &Object, launch: &Launch, rejected: Option<&str>) -> Result<bool, Failure> {
+    let Some(store) = oauth::Store::new(name, config, launch.cwd(), &launch.source) else { return Ok(false) };
+    let url = config.get("url").and_then(Value::as_str).ok_or("MCP server without a URL")?;
+    if has_authorization(&configured_headers(name, config, url, launch).await?) {
+        return Ok(false);
+    }
+    store.refresh_rejected(rejected).await.map_err(|err| auth_failure(name, err))
 }
 
 /// Server-sent events from a growing buffer: (event, data, id) for each complete event.
@@ -367,7 +395,12 @@ impl Client {
             let chunk = response.chunk().await.map_err(|e| e.to_string())?.ok_or("the SSE stream ended before naming its endpoint")?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
             if let Some((_, data, _)) = take_events(&mut buffer).into_iter().find(|(event, _, _)| event == "endpoint") {
-                break reqwest::Url::parse(url).and_then(|base| base.join(&data)).map_err(|e| e.to_string())?.to_string();
+                let base = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
+                let post = base.join(&data).map_err(|e| e.to_string())?;
+                if post.origin() != base.origin() {
+                    return Err(format!("SSE POST endpoint has a different origin: {}", post.origin().ascii_serialization()).into());
+                }
+                break post.to_string();
             }
         };
         let client = Client::new(Transport::Sse { post, headers }, notify, roots);
@@ -577,13 +610,20 @@ impl Health {
 pub async fn probe(name: &str, config: &Object, launch: &Launch) -> Health {
     let ms = std::env::var("MCP_TIMEOUT").ok().and_then(|v| v.parse().ok()).filter(|ms| *ms > 0).unwrap_or(CONNECT_TIMEOUT_MS);
     let ignore: Notify = Arc::new(|_| {});
-    match tokio::time::timeout(Duration::from_millis(ms), Client::connect(name, config, launch, ignore)).await {
+    let connect = async {
+        let result = Client::connect(name, config, launch, ignore.clone()).await;
+        if matches!(result, Err(Failure::Status(401, _))) && refresh_oauth(name, config, launch, None).await? {
+            return Client::connect(name, config, launch, ignore).await;
+        }
+        result
+    };
+    match tokio::time::timeout(Duration::from_millis(ms), connect).await {
         Err(_) => Health::Failed(format!("MCP server \"{name}\" connection timed out after {ms}ms")),
         Ok(Ok(client)) => {
             client.close().await;
             Health::Connected
         }
-        Ok(Err(Failure::Status(401, _))) if config.get("headersHelper").is_none() && matches!(config.get("type").and_then(Value::as_str), Some("http" | "streamable-http" | "sse")) => Health::NeedsAuth,
+        Ok(Err(Failure::Status(401, _))) if config.get("headersHelper").is_none() && oauth::supports(config) => Health::NeedsAuth,
         Ok(Err(e)) => Health::Failed(e.to_string()),
     }
 }
@@ -659,9 +699,33 @@ impl Bridge {
         }
         let id = id?;
         let mut outcome = self.call(method, &params, cancel).await;
-        if method == "tools/call" && outcome.as_ref().is_err_and(Failure::unauthorized) && self.config.contains_key("headersHelper") {
+        if matches!(method, "initialize" | "tools/call") && matches!(outcome, Err(Failure::Status(401, _))) {
+            let rejected = self.client.lock().await.as_ref().and_then(|client| {
+                let headers = match &client.transport {
+                    Transport::Http { headers, .. } | Transport::Sse { headers, .. } => headers,
+                    _ => return None,
+                };
+                headers.iter().find(|(key, _)| key.eq_ignore_ascii_case("authorization"))
+                    .and_then(|(_, value)| value.strip_prefix("Bearer ")).map(str::to_owned)
+            });
+            let refresh = tokio::select! {
+                result = refresh_oauth(&self.name, &self.config, &self.launch, rejected.as_deref()) => result,
+                _ = cancel.cancelled() => Err("cancelled".into()),
+            };
+            match refresh {
+                Ok(retry) if retry || (method == "tools/call" && self.config.contains_key("headersHelper")) => {
+                    self.close().await;
+                    outcome = self.call(method, &params, cancel).await;
+                }
+                Err(error) => outcome = Err(error),
+                Ok(_) => {}
+            }
+        } else if method == "tools/call" && outcome.as_ref().is_err_and(Failure::unauthorized) && self.config.contains_key("headersHelper") {
             self.close().await;
             outcome = self.call(method, &params, cancel).await;
+        }
+        if matches!(outcome, Err(Failure::Status(401, _))) && oauth::supports(&self.config) {
+            outcome = Err(format!("HTTP 401. Run `claude mcp login {}` to authenticate", self.name).into());
         }
         Some(match outcome {
             Ok(Ok(result)) => rpc_result(id, result),

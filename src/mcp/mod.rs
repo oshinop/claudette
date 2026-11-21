@@ -6,6 +6,7 @@ pub mod bridge;
 pub mod cli;
 pub mod config;
 pub mod local;
+mod oauth;
 
 use std::path::PathBuf;
 use std::sync::Arc;

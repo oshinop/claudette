@@ -166,6 +166,7 @@ pub struct Delivered {
     pub plugins: Option<String>,
     /// The user's configuration files, and where saves of them come back.
     pub config: Delivery,
+    pub browser: String,
     /// The remote claude's `--settings`: the caller's, when it gave any, without its plugin choices.
     pub settings: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -190,6 +191,7 @@ pub fn deliver(hub: &SocketHub, forwards: &mut Forwards, args: &mut ParsedArgs, 
         settings.get_or_insert_default().insert("pluginConfigs".into(), serde_json::Value::Object(options));
     }
     let plugins = hub.serve_plugins(forwards, enabled, callbacks.clone())?;
+    let browser = hub.serve_browser(forwards, Arc::new(crate::browser::Browser::new(config.clone())))?;
     let config = hub.serve_user_config(forwards, Arc::new(UserConfig::new(callbacks)))?;
-    Ok(Delivered { sftp, user, sessions, plugins, config, settings })
+    Ok(Delivered { sftp, user, sessions, plugins, config, browser, settings })
 }

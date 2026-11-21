@@ -50,6 +50,11 @@ claude mcp add --remote --transport http docs https://example.com/mcp -H 'Author
 
 `claude plugin install`、`claude plugin marketplace add` 和其他插件命令操作的是本地机器上的插件，与本地 claude 相同。会话会加载已安装且已启用的插件，插件的 hook 和 MCP server 在本地机器上运行。
 
+<a id="links-opened-on-the-remote-machine"></a>
+## 远程机器上打开的链接
+
+远程机器上的程序（例如用 `--remote` 添加的服务器）通过 `$BROWSER` 打开链接时，链接会在本地机器上打开，所在的独立浏览器窗口经由远程机器联网：该窗口中的 `localhost` 是远程机器的，域名在远程机器上解析，网站看到的是远程机器的地址。claudette 使用 Google Chrome、Chromium、Brave、Microsoft Edge 或 Firefox，并在 `~/.config/claudette/browser` 中为每台远程机器准备单独的配置文件，因此该窗口不带你日常浏览器的 Cookie 或扩展。只会打开 `http` 和 `https` 链接。打开窗口的会话运行期间，窗口可以访问远程机器。
+
 <a id="sessions-talking-to-each-other"></a>
 ## 会话间通信
 

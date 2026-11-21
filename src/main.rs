@@ -1,4 +1,5 @@
 mod args;
+mod browser;
 mod commands;
 mod config;
 mod direct;

@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use crate::json::Object;
 use crate::permissions::rules::{Behavior, PathRules};
 
-pub use bash::kill_all_commands;
+pub use bash::{kill_all_commands, track_group};
 
 pub enum Content {
     Text(String),

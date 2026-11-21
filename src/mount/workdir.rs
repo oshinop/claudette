@@ -17,7 +17,7 @@ use crate::json::json_text;
 use crate::mount::warm::PathParts;
 use crate::sockets::Forwards;
 use crate::ssh::{Script, shell_quote};
-use crate::userconfig::Delivery;
+use crate::run::Delivered;
 
 /// The folder under the remote home that holds every workspace.
 pub const ROOT: &str = ".claudette/ws";
@@ -123,7 +123,8 @@ const MOUNT_ENDED: &str = "'claudette: a mount of this machine ended on the remo
 /// claude's stderr instead of leaving claude reading and writing nothing without a word. The
 /// sessions folder's near end writes transcripts behind; the session ends once the laptop has
 /// confirmed the last of them (the near end's held warm start, `$T.sessions.warm.held`, goes then).
-pub fn mount(cwd: &Path, forwards: &Forwards, sftp: &str, user: Option<&str>, plugins: Option<&str>, sessions: &str, config: &Delivery) -> Script {
+pub fn mount(cwd: &Path, forwards: &Forwards, delivered: &Delivered) -> Script {
+    let Delivered { sftp, user, sessions, plugins, config, browser, .. } = delivered;
     let work = format!("\"$HOME\"/{}", shell_quote(&remote_workdir(cwd)));
     // /tmp's real path (/private/tmp on macOS), as `mount` reports mount points.
     let temp = run_prefix(&forwards.run);
@@ -136,6 +137,8 @@ pub fn mount(cwd: &Path, forwards: &Forwards, sftp: &str, user: Option<&str>, pl
         "mkdir -p \"$W\" \"$HOME/.claude\" || exit 1".to_owned(),
         "mkdir -m 700 \"$T.inbox\" && export CLAUDE_CODE_TMPDIR=\"$T.inbox\" || exit 1".to_owned(),
     ];
+    let opener = format!("exec \"$CLAUDETTE_HELPER\" __helper open {} \"$@\"", shell_quote(browser));
+    setup.push(format!("printf '%s\\n' '#!/bin/sh' {} >\"$T.browser\" && chmod 700 \"$T.browser\" && export BROWSER=\"$T.browser\" || exit 1", shell_quote(&opener)));
     // This machine's files for the Claude Code folder.
     setup.push("mkdir -m 700 \"$T.laptop\" \"$T.config\" || exit 1".to_owned());
     for (file, name) in [(&config.settings, "settings.json"), (&config.keybindings, "keybindings.json")] {
@@ -237,7 +240,7 @@ pub fn mount(cwd: &Path, forwards: &Forwards, sftp: &str, user: Option<&str>, pl
         steps.push("rmdir \"$T.plugins\" 2>/dev/null".to_owned());
     }
     let mut remove: Vec<String> = ["\"$T", "\"$T.user", "\"$T.plugins", "\"$T.config", "\"$T.sessions"].iter().flat_map(|prefix| [format!("{prefix}.fifo\""), format!("{prefix}.err\"")]).collect();
-    remove.extend(["\"$T.config.log\"", "\"$T.sb\"", "\"$T.bwrap\"", "\"$T.ending\"", "\"$T.unmounted\""].map(str::to_owned));
+    remove.extend(["\"$T.config.log\"", "\"$T.sb\"", "\"$T.bwrap\"", "\"$T.ending\"", "\"$T.unmounted\"", "\"$T.browser\""].map(str::to_owned));
     remove.extend(forwards.list.iter().map(|f| shell_quote(&f.remote)).chain(forwards.files.iter().map(|f| shell_quote(&f.remote))));
     // A near end that was stopped leaves its warm start held.
     remove.extend(forwards.files.iter().filter(|f| f.name.ends_with(".warm")).map(|f| shell_quote(&format!("{}.held", f.remote))));

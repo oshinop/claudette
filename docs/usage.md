@@ -68,6 +68,16 @@ the redirect URL), and the tokens stay on the local machine, in `~/.config/claud
 local machine's plugins, as with a local claude. Sessions load what's installed and enabled, and the
 plugins' hooks and MCP servers run on the local machine.
 
+## Links opened on the remote machine
+
+When a program on the remote machine opens a link with `$BROWSER`, such as a server you added with
+`--remote`, the link opens on the local machine, in a separate browser window that goes online
+through the remote machine: `localhost` in that window is the remote machine's, names resolve there,
+and sites see the remote machine's address. claudette uses Google Chrome, Chromium, Brave, Microsoft
+Edge or Firefox, with its own profile for each remote machine in `~/.config/claudette/browser`, so
+the window has none of your everyday browser's cookies or extensions. Only `http` and `https` links
+open. The window reaches the remote machine while the session that opened it runs.
+
 ## Sessions talking to each other
 
 Sessions on the same local machine, whether in terminals or in hosts, can find each other with ListAgents

@@ -75,7 +75,7 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
     let mut bridges: Vec<Arc<Bridge>> = vec![];
 
     let result = async {
-        let delivered = deliver(&hub, &mut forwards, &mut p, &ws, config)?;
+        let mut delivered = deliver(&hub, &mut forwards, &mut p, &ws, config)?;
         if !p.local_tools.is_empty() {
             let local = Arc::new(LocalTools::new(ws.clone(), &p.local_tools));
             let (path, _) = hub.serve_mcp(SERVER, Endpoint::Local(local.clone()))?;
@@ -143,7 +143,7 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
         let rules = forwards.file("bash-rules.json", json!({ "allow": p.bash_allow, "deny": p.bash_deny }).to_string().into_bytes());
         let pretool = format!("exec \"$CLAUDETTE_HELPER\" __helper hook {} {}", shell_quote(&rules), shell_quote(&hook_socket));
         let notify = format!("exec \"$CLAUDETTE_HELPER\" __helper notify {}", shell_quote(&hook_socket));
-        let hooked = with_hook(delivered.settings, &pretool, &notify, &p.ask_tools);
+        let hooked = with_hook(delivered.settings.take(), &pretool, &notify, &p.ask_tools);
         let settings = crate::settings::session_settings(Some(hooked));
         let settings_file = settings.as_ref().map(|s| forwards.file("session-settings.json", Value::Object(s.clone()).to_string().into_bytes()));
 
@@ -158,7 +158,7 @@ pub async fn direct(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Res
         env.insert("CLAUDE_CODE_DISABLE_CLAUDE_MDS".into(), "1".into());
         env.insert(crate::settings::AGENT_TEAMS.into(), "0".into());
         env.insert(crate::settings::AGENT_VIEW.into(), "1".into());
-        let script = workdir::mount(cwd, &forwards, &delivered.sftp, delivered.user.as_deref(), delivered.plugins.as_deref(), &delivered.sessions, &delivered.config);
+        let script = workdir::mount(cwd, &forwards, &delivered);
         let tty = is_tty();
         // claude's environment travels with the run, never on the remote command line.
         let mut run_env: serde_json::Map<String, Value> = env.into_iter().map(|(k, v)| (k, json!(v))).collect();

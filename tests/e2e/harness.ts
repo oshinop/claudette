@@ -232,14 +232,16 @@ export async function launch(dir: string, args: string[], until: string) {
   };
 }
 
-/** A stdio MCP server for the remote machine, which has node but no MCP SDK. Its `where` tool reports the host and $TOKEN. */
-const REMOTE_SERVER = `const os = require("os"); let b = "";
+/** A stdio MCP server for the remote machine, which has node but no MCP SDK. Its `where` tool reports the host and $TOKEN; its `open` tool hands a link to $BROWSER. */
+const REMOTE_SERVER = `const os = require("os"); const { spawnSync } = require("child_process"); let b = "";
 process.stdin.on("data", (d) => { b += d; let i;
   while ((i = b.indexOf("\\n")) >= 0) { const l = b.slice(0, i); b = b.slice(i + 1); if (!l.trim()) continue; const m = JSON.parse(l);
     const r = (x) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: x }) + "\\n");
+    const text = (t) => r({ content: [{ type: "text", text: t }] });
     if (m.method === "initialize") r({ protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "remote", version: "1" } });
-    else if (m.method === "tools/list") r({ tools: [{ name: "where", description: "Reports where this server runs", inputSchema: { type: "object" } }] });
-    else if (m.method === "tools/call") r({ content: [{ type: "text", text: "stdio-server-on:" + os.hostname() + " token:" + (process.env.TOKEN || "") }] });
+    else if (m.method === "tools/list") r({ tools: [{ name: "where", description: "Reports where this server runs", inputSchema: { type: "object" } }, { name: "open", description: "Opens a link with $BROWSER", inputSchema: { type: "object", properties: { url: { type: "string" } } } }] });
+    else if (m.method === "tools/call" && m.params.name === "open") { const o = spawnSync(process.env.BROWSER, [m.params.arguments.url], { encoding: "utf8" }); text("status:" + o.status + " " + (o.stderr || "").trim()); }
+    else if (m.method === "tools/call") text("stdio-server-on:" + os.hostname() + " token:" + (process.env.TOKEN || ""));
     else if (m.id !== undefined) r({}); } });`;
 
 /** Puts the remote machine's MCP server at /tmp/where.cjs on the remote machine and returns that path. */

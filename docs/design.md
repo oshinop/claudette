@@ -362,6 +362,26 @@ paths (`installed_plugins.json`, `known_marketplaces.json`, the settings files) 
 paths and are written back with this machine's, so the store is what a local claude would have left.
 Nothing is installed on the remote machine.
 
+## Links
+
+The run's setup writes `$T.browser`, a script that runs `__helper open <socket> <url>`, and exports
+it as `BROWSER`, so everything the remote claude starts inherits it. The helper sends the link over
+a socket forwarded to this machine, which opens only `http` and `https` and answers `ok` or the
+error; the helper prints the error and fails.
+
+Here the link opens in the first of Chrome, Chromium, Brave, Edge and Firefox that is installed,
+with a profile for each remote host in `~/.config/claudette/browser/<browser>-<host>`, where
+`<host>` is the first 12 hex digits of the host's SHA-256. The browser goes online through
+`ssh -N -D` to that host: a SOCKS5 proxy on a loopback port kept in the profile
+(`claudette-proxy-port`), since a running browser keeps the proxy it started with. The ssh
+connection is its own rather than the shared one, and never prompts. Chromium resolves names
+through the proxy and sends loopback addresses through it too (`--proxy-bypass-list=<-loopback>`);
+WebRTC sends no UDP outside the proxy, and QUIC, background networking, component updates, sync and crash
+reports are off. Firefox gets the same through `user.js`: remote DNS through the proxy, DNS over
+HTTPS off, the proxy for `localhost`, no direct failover, WebRTC, prefetching, HTTP/3 and telemetry
+off. The proxy belongs to the session that started it and stops when that session ends; the next
+link starts it again.
+
 ## SDK relay
 
 The Agent SDK talks to `claude` over stdin and stdout using the stream-json control protocol.

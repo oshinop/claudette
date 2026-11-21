@@ -83,16 +83,17 @@ describe("claudette as claude, with -p", () => {
     expect(run.hooks.map((h) => h.decision?.behavior)).toEqual(["allow", "deny"]);
   });
 
-  test("with no local tools allowed, only the workspace, the sessions folder, the hook, the user configuration's saves and the inbox relay are served", async () => {
+  test("with no local tools allowed, only the workspace, the sessions folder, the hook, the user configuration's saves, the browser relay and the inbox relay are served", async () => {
     const dir = project();
     const run = claude(dir, ["-p", "title please", "--output-format", "json", "--tools", ""]);
     expect(run.result.result, run.out).toBe("ok");
     // The workspace (its SFTP server and the project's hook callbacks), the sessions folder,
     // claudette's own hook, which also reports whether the session is working or idle, and the
     // socket the Claude Code folder's saves come back on (this machine has no settings file to
-    // send). The session's settings, the appended system prompt and the MCP configuration, which
-    // holds only the inbox relay, come with the run's first frames, off the remote command line.
-    expect(JSON.parse(run.spawn).sockets).toBe(5);
+    // send), and the socket `$BROWSER` hands links to. The session's settings, the appended system
+    // prompt and the MCP configuration, which holds only the inbox relay, come with the run's first
+    // frames, off the remote command line.
+    expect(JSON.parse(run.spawn).sockets).toBe(6);
   });
 
   test("the remote claude sees the project at its folder, and nothing else of the remote machine's home", async () => {
@@ -394,6 +395,60 @@ describe("plugins: Claude Code's own installer, working on the local machine's s
       rmSync(join(claudeDir, "plugins"), { recursive: true, force: true });
       if (before === undefined) rmSync(settingsFile, { force: true });
       else writeFileSync(settingsFile, before);
+    }
+  });
+});
+
+/** A stand-in for Chromium: records its arguments, then loads the link through the SOCKS5 proxy it was given, as Chromium would. */
+const FAKE_CHROMIUM = `#!/usr/bin/env bun
+const net = require("node:net");
+const args = process.argv.slice(2);
+const port = Number(args.find((a) => a.startsWith("--proxy-server=")).split(":").pop());
+const url = new URL(args.at(-1));
+const sock = net.connect(port, "127.0.0.1");
+let stage = 0, buf = Buffer.alloc(0);
+sock.on("connect", () => sock.write(Buffer.from([5, 1, 0])));
+sock.on("data", (d) => {
+  buf = Buffer.concat([buf, d]);
+  if (stage === 0 && buf.length >= 2) { stage = 1; buf = buf.subarray(2); const h = Buffer.from(url.hostname); const p = Number(url.port || 80);
+    sock.write(Buffer.concat([Buffer.from([5, 1, 0, 3, h.length]), h, Buffer.from([p >> 8, p & 255])])); }
+  if (stage === 1 && buf.length >= 10) { stage = 2; buf = buf.subarray(10); sock.write("GET " + url.pathname + " HTTP/1.0\\r\\nHost: " + url.host + "\\r\\n\\r\\n"); }
+});
+sock.on("end", () => require("node:fs").writeFileSync(process.env.FAKE_BROWSER_OUT, JSON.stringify({ args, page: buf.toString().split("\\r\\n\\r\\n").slice(1).join("") })));
+`;
+
+describe("links the remote claude opens", () => {
+  test("$BROWSER opens them on the local machine, in a browser whose traffic leaves from the remote machine; other kinds of link are refused", async () => {
+    const server = installRemoteServer();
+    onRemote(`nohup node -e 'require("http").createServer((q, r) => r.end("served-by:" + require("os").hostname() + q.url)).listen(8765, "127.0.0.1")' >/dev/null 2>&1 &`);
+    const bin = mkdtempSync(join(tmpdir(), "bin-"));
+    writeFileSync(join(bin, "chromium"), FAKE_CHROMIUM, { mode: 0o755 });
+    const out = join(bin, "opened.json");
+    const dir = project();
+    try {
+      expect(mcp(dir, "add", "--remote", "--", "opener", "node", server).code).toBe(0);
+      const id = await scenario([
+        { tool: "open", input: { url: "http://localhost:8765/callback?code=1" } },
+        { tool: "open", input: { url: "file:///etc/passwd" } },
+        { text: "{{last_tool_result}}" },
+      ]);
+      const run = claude(dir, ["-p", `[[scenario:${id}]] open`, "--output-format", "json", "--allowedTools", "mcp__opener__open"], {
+        ENABLE_TOOL_SEARCH: "false",
+        PATH: `${bin}:${process.env.PATH}`,
+        FAKE_BROWSER_OUT: out,
+      });
+      expect(run.result.result, run.out).toMatch(/^status:1 claudette: .*file/);
+      expect(await until(() => existsSync(out), 15_000)).toBe(true);
+      const opened = JSON.parse(readFileSync(out, "utf8")) as { args: string[]; page: string };
+      expect(opened.page).toBe(`served-by:${onRemote("hostname")}/callback`);
+      expect(opened.args).toContain(`--user-data-dir=${join(homedir(), ".config/claudette/browser")}/chromium-${new Bun.CryptoHasher("sha256").update("remote").digest("hex").slice(0, 12)}`);
+      expect(opened.args).toContain("--webrtc-ip-handling-policy=disable_non_proxied_udp");
+      expect(await until(() => Bun.spawnSync(["pgrep", "-f", "-- -D 127.0.0.1:"]).stdout.toString().trim() === "", 5_000)).toBe(true);
+      expect(await leftoverSockets()).toBe("0");
+    } finally {
+      mcp(dir, "remove", "opener");
+      onRemote("pkill -f 'listen(8765'");
+      rmSync(bin, { recursive: true, force: true });
     }
   });
 });

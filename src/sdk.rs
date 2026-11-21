@@ -39,13 +39,13 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
     let agent = peers::Agent::new(&forwards.run, args.name.clone(), cwd, peers::queued(to_inbox));
     peers::register(agent.clone());
     hub.serve_agent(agent.clone())?;
-    let delivered = deliver(&hub, &mut forwards, &mut args, &ws, config)?;
+    let mut delivered = deliver(&hub, &mut forwards, &mut args, &ws, config)?;
     // Servers that run here reach claude as SDK servers through the relay; remote ones it starts
     // itself, and so the inbox relay, which has to be a process of claude's own.
     let mut remote_servers = args.remote_servers.clone();
     remote_servers.insert(helper::INBOX_SERVER.into(), helper::inbox_server(&forwards.run));
     let mcp_config = Some(forwards.file("mcp.json", serde_json::json!({ "mcpServers": remote_servers }).to_string().into_bytes()));
-    let session_settings = settings::session_settings(settings::with_asks(delivered.settings, &args.ask_tools));
+    let session_settings = settings::session_settings(settings::with_asks(delivered.settings.take(), &args.ask_tools));
     let settings_file = session_settings.as_ref().map(|s| forwards.file("session-settings.json", serde_json::Value::Object(s.clone()).to_string().into_bytes()));
     let append_system_prompt_file = (!args.append_system_prompt.is_empty())
         .then(|| forwards.file("append-prompt.md", args.append_system_prompt.join("\n\n").into_bytes()));
@@ -58,7 +58,7 @@ pub async fn session(config: &Config, argv: &[String], cwd: &Path) -> anyhow::Re
         append_system_prompt_file,
         plugin_dir: delivered.plugins.is_some().then(|| workdir::plugins_dir(&forwards.run)),
     };
-    let script = workdir::mount(cwd, &forwards, &delivered.sftp, delivered.user.as_deref(), delivered.plugins.as_deref(), &delivered.sessions, &delivered.config);
+    let script = workdir::mount(cwd, &forwards, &delivered);
     let spec = tunnel::Spec {
         run: forwards.run.clone(),
         command: claude_command(config, &script, &remote_args(&args, &extras)),

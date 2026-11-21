@@ -72,6 +72,7 @@ pub fn main(args: &[String]) -> i32 {
         (Some("hook"), Some(rules)) if args.len() == 3 => runtime.block_on(holder::hook(rules, &args[2])),
         (Some("config"), _) => runtime.block_on(config::serve(&args[1..])),
         (Some("probe"), None) => runtime.block_on(probe()),
+        (Some("open"), Some(socket)) if args.len() == 3 => runtime.block_on(open(socket, &args[2])),
         (Some("sftp"), _) => runtime.block_on(near::serve(&args[1..])),
         _ => {
             eprintln!("claudette: unknown helper command");
@@ -95,6 +96,27 @@ async fn probe() -> i32 {
     let results: Map<String, Value> = futures_util::future::join_all(checks).await.into_iter().collect();
     println!("{}", Value::Object(results));
     0
+}
+
+async fn open(socket: &str, url: &str) -> i32 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(mut conn) = tokio::net::UnixStream::connect(socket).await else {
+        eprintln!("claudette: the session's browser relay is gone");
+        return 1;
+    };
+    let mut reply = String::new();
+    if conn.write_all(format!("{url}\n").as_bytes()).await.is_err() || conn.read_to_string(&mut reply).await.is_err() {
+        eprintln!("claudette: the session's browser relay did not answer");
+        return 1;
+    }
+    match reply.trim().strip_prefix("error: ") {
+        None if reply.trim() == "ok" => 0,
+        Some(error) => {
+            eprintln!("claudette: {error}");
+            1
+        }
+        None => 1,
+    }
 }
 
 /// Run ids are claudette's own 16 hex digits; nothing else may name a path.

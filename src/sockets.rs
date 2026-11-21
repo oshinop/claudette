@@ -329,6 +329,33 @@ impl SocketHub {
         Ok(path)
     }
 
+    pub fn serve_browser(&self, forwards: &mut Forwards, browser: Arc<crate::browser::Browser>) -> anyhow::Result<String> {
+        let (path, listener) = self.listen()?;
+        self.spawn(async move {
+            while let Ok((conn, _)) = listener.accept().await {
+                let browser = browser.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = conn.into_split();
+                    let mut line = String::new();
+                    if BufReader::new(read.take(64 * 1024)).read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    trace("browser", line.trim());
+                    let reply = match browser.open(line.trim()).await {
+                        Ok(()) => "ok\n".to_owned(),
+                        Err(e) => {
+                            crate::log::warn(&e);
+                            format!("error: {e}\n")
+                        }
+                    };
+                    let _ = write.write_all(reply.as_bytes()).await;
+                    let _ = write.shutdown().await;
+                });
+            }
+        });
+        Ok(forwards.add(&path))
+    }
+
     /// Serves a Claude Code command hook: the hook's JSON input arrives on the connection, possibly
     /// without a newline, and the answer goes back before the connection closes.
     pub fn serve_hook(&self, answer: HookAnswer) -> anyhow::Result<PathBuf> {

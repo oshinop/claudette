@@ -67,11 +67,11 @@ async fn run(argv: Vec<String>) -> anyhow::Result<i32> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let _ = rustls::crypto::ring::default_provider().install_default();
     // On the remote machine: the session helper, which runs its own runtime.
     if args.first().map(String::as_str) == Some("__helper") {
         std::process::exit(helper::main(&args[1..]));
     }
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a tokio runtime");
     let code = runtime.block_on(run(args)).unwrap_or_else(|e| {
         warn(&e.to_string());

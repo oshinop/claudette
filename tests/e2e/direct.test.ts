@@ -240,6 +240,27 @@ describe("MCP servers: all configured on the local machine, each running where i
     }
   });
 
+  test("a remote http server is checked on the remote machine and reported connected", async () => {
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const server = `require("http").createServer((q, r) => { let b = ""; q.on("data", (d) => (b += d)); q.on("end", () => {
+  if (q.method !== "POST") { r.writeHead(405); return r.end(); }
+  const m = JSON.parse(b);
+  if (m.id === undefined) { r.writeHead(202); return r.end(); }
+  const result = m.method === "initialize" ? { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "remote-http", version: "1" } } : m.method === "tools/list" ? { tools: [] } : {};
+  r.writeHead(200, { "content-type": "application/json" }); r.end(JSON.stringify({ jsonrpc: "2.0", id: m.id, result }));
+}); }).listen(${port}, "127.0.0.1");`;
+    onRemote(`cat > /tmp/http-mcp.cjs <<'EOF'\n${server}\nEOF\nnohup node /tmp/http-mcp.cjs >/dev/null 2>&1 &`);
+    const dir = project();
+    try {
+      const url = `http://localhost:${port}/mcp`;
+      expect(mcp(dir, "add", "--remote", "--transport", "http", "remote-http", url).code).toBe(0);
+      expect(await until(() => mcp(dir, "list").out.includes(`remote-http: ${url} (HTTP) - ✔ Connected`), 10_000), mcp(dir, "list").out).toBe(true);
+    } finally {
+      mcp(dir, "remove", "remote-http");
+      onRemote("pkill -f /tmp/http-mcp.cjs; rm -f /tmp/http-mcp.cjs");
+    }
+  });
+
   test("project scope writes the local machine's .mcp.json and approves it here", () => {
     const dir = project();
     const add = mcp(dir, "add", "--scope", "project", "proj-server", "--", "bun", FIXTURE);

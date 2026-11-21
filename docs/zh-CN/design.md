@@ -130,7 +130,7 @@ claude mcp list
 claude mcp remove docs
 ```
 
-无法解析的 `~/.claude.json` 会保持原样，而不会被改写。与 Claude Code 一样，如果同一作用域中已有同名服务器，无论它在哪个文件中，添加都会失败。`list` 和 `get` 会连接每个服务器后输出 Claude Code 的状态：本地服务器在本机检查，远程服务器通过远程机器上辅助程序的 `probe` 命令检查，所有远程服务器只用一次 ssh 调用。不支持 `claude mcp serve` 和 `add-from-claude-desktop`。
+无法解析的 `~/.claude.json` 会保持原样，而不会被改写。与 Claude Code 一样，如果同一作用域中已有同名服务器，无论它在哪个文件中，添加都会失败。`list` 和 `get` 会连接每个服务器后输出 Claude Code 的状态：本地服务器在本机检查，远程服务器通过远程机器上辅助程序的 `probe` 命令检查，所有远程服务器只用一次 ssh 调用。`add-from-claude-desktop` 读取本机 Claude Desktop 的配置（macOS，或 WSL 中的 Windows 用户文件夹），并用 Claude Code 的选择界面列出其中的 stdio 服务器。不支持 `claude mcp serve`。
 
 名称冲突时，宿主的服务器优先，其次是 claudette 自己的服务器（本地作用域优先于用户作用域），然后依次是 `~/.claude.json` 的本地作用域、项目的 `.mcp.json`、`~/.claude.json` 的用户作用域。`${VAR}` 和 `${VAR:-default}` 从本机环境展开，远程服务器也一样。
 

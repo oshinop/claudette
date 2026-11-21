@@ -34,7 +34,28 @@ pub async fn run(argv: &[String], cwd: &Path) -> anyhow::Result<i32> {
             println!("Servers in .mcp.json start again once you approve them in .claude/settings.local.json.");
             Ok(0)
         }
-        "serve" | "add-from-claude-desktop" => fail(format!("`claude mcp {}` is not available with claudette", args[0])),
+        "add-from-claude-desktop" => {
+            let scope = match rest {
+                [] => Scope::Local,
+                [flag, value] if flag == "-s" || flag == "--scope" => match Scope::parse(value) {
+                    Ok(scope) => scope,
+                    Err(e) => return fail(e),
+                },
+                [flag] if flag.starts_with("--scope=") => match Scope::parse(&flag["--scope=".len()..]) {
+                    Ok(scope) => scope,
+                    Err(e) => return fail(e),
+                },
+                [other, ..] => return fail(format!("error: unknown option '{other}'")),
+            };
+            match super::desktop::import(scope, cwd)? {
+                Ok(message) => {
+                    println!("{message}");
+                    Ok(0)
+                }
+                Err(message) => fail(message),
+            }
+        }
+        "serve" => fail("`claude mcp serve` is not available with claudette"),
         other => fail(format!("error: unknown command '{other}'")),
     }
 }
@@ -386,13 +407,13 @@ fn add(args: &[String], cwd: &Path, as_json: bool) -> anyhow::Result<i32> {
         None
     };
     let file = mcp::add(cwd, scope, &name, config.clone(), place)?;
-    if let Some((store, secret)) = secret {
-        if let Err(error) = store.set_client_secret(secret) {
-            if let Err(rollback) = mcp::remove(cwd, Some(scope), &name) {
-                return fail(format!("Could not store the OAuth client secret: {error:#}; could not remove the server configuration: {rollback:#}"));
-            }
-            return fail(format!("Could not store the OAuth client secret: {error:#}"));
+    if let Some((store, secret)) = secret
+        && let Err(error) = store.set_client_secret(secret)
+    {
+        if let Err(rollback) = mcp::remove(cwd, Some(scope), &name) {
+            return fail(format!("Could not store the OAuth client secret: {error:#}; could not remove the server configuration: {rollback:#}"));
         }
+        return fail(format!("Could not store the OAuth client secret: {error:#}"));
     }
     let file = if scope == Scope::Project { PathBuf::from(mcp::project_key(cwd)).join(".mcp.json") } else { file };
     let url = config.get("url").and_then(Value::as_str).unwrap_or("");

@@ -47,7 +47,8 @@ claude mcp add --remote --transport http docs https://example.com/mcp -H 'Author
 ```
 
 `claude mcp list` and `claude mcp get` check each server as Claude Code does, a remote server from
-the remote machine. `claude mcp add-json` and `claude mcp reset-project-choices` work too. `${VAR}`
+the remote machine. `claude mcp add-json`, `claude mcp add-from-claude-desktop` (the local machine's
+Claude Desktop) and `claude mcp reset-project-choices` work too. `${VAR}`
 in a server's settings is filled in from the local machine's environment, for remote servers as
 well. A server's `headersHelper` runs on the local machine.
 

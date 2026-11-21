@@ -5,6 +5,7 @@
 pub mod bridge;
 pub mod cli;
 pub mod config;
+mod desktop;
 pub mod local;
 mod oauth;
 

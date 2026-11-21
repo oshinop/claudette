@@ -46,6 +46,14 @@ fn string_map(value: Option<&Value>) -> Vec<(String, String)> {
     value.and_then(Value::as_object).map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect()).unwrap_or_default()
 }
 
+fn unreachable(error: reqwest::Error) -> Failure {
+    let mut cause: &dyn std::error::Error = &error;
+    while let Some(next) = cause.source() {
+        cause = next;
+    }
+    Failure::Other(format!("{error}: {cause}"))
+}
+
 #[derive(Debug)]
 pub enum Failure {
     Status(u16, String),
@@ -385,7 +393,7 @@ impl Client {
         for (k, v) in &headers {
             request = request.header(k, v);
         }
-        let mut response = request.send().await.map_err(|e| e.to_string())?;
+        let mut response = request.send().await.map_err(unreachable)?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             return Err(Failure::Status(status, response.text().await.unwrap_or_default().trim().to_owned()));
@@ -495,7 +503,7 @@ impl Client {
             }
             request = request.header("mcp-protocol-version", version.lock().unwrap().clone());
         }
-        let mut response = request.send().await.map_err(|e| e.to_string())?;
+        let mut response = request.send().await.map_err(unreachable)?;
         if let Transport::Http { session, .. } = &self.transport
             && let Some(id) = response.headers().get("mcp-session-id").and_then(|v| v.to_str().ok())
         {

@@ -374,14 +374,14 @@ const CHOICES: [&str; 3] = ["enabledMcpjsonServers", "disabledMcpjsonServers", "
 pub fn reset_choices(cwd: &Path) -> anyhow::Result<()> {
     let file = claude_file();
     let mut root = read_for_change(&file)?;
-    if let Some(Value::Object(entry)) = root.get_mut("projects").and_then(|p| p.get_mut(&project_key(cwd)))
-        && CHOICES.iter().fold(false, |changed, key| entry.remove(*key).is_some() || changed)
+    if let Some(Value::Object(entry)) = root.get_mut("projects").and_then(|p| p.get_mut(project_key(cwd)))
+        && CHOICES.map(|key| entry.remove(key).is_some()).contains(&true)
     {
         write_pretty(&file, &root)?;
     }
     let local = cwd.join(".claude").join("settings.local.json");
     let mut settings = read_for_change(&local)?;
-    if CHOICES.iter().fold(false, |changed, key| settings.remove(*key).is_some() || changed) {
+    if CHOICES.map(|key| settings.remove(key).is_some()).contains(&true) {
         write_pretty(&local, &settings)?;
     }
     Ok(())

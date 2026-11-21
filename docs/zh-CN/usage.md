@@ -39,7 +39,7 @@ claude mcp remove fs
 claude mcp add --remote --transport http docs https://example.com/mcp -H 'Authorization: Bearer …'
 ```
 
-`claude mcp list` 和 `claude mcp get` 会像 Claude Code 一样检查每个服务器，远程服务器从远程机器上检查。`claude mcp add-json` 和 `claude mcp reset-project-choices` 也可使用。服务器设置中的 `${VAR}` 会从本地机器的环境中填入，远程服务器也不例外。服务器的 `headersHelper` 在本地机器上运行。
+`claude mcp list` 和 `claude mcp get` 会像 Claude Code 一样检查每个服务器，远程服务器从远程机器上检查。`claude mcp add-json`、`claude mcp add-from-claude-desktop`（本地机器上的 Claude Desktop）和 `claude mcp reset-project-choices` 也可使用。服务器设置中的 `${VAR}` 会从本地机器的环境中填入，远程服务器也不例外。服务器的 `headersHelper` 在本地机器上运行。
 
 项目 `.mcp.json` 中的服务器会在你批准后启动。claudette 不会显示批准提示：`claude mcp add --scope project` 会批准它添加的服务器，其他服务器需要在 `.claude/settings.local.json` 的 `"enabledMcpjsonServers"` 中批准。
 

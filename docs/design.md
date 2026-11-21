@@ -278,8 +278,10 @@ claude mcp remove docs
 A `~/.claude.json` that does not parse is left alone rather than rewritten. Adding a server whose
 name its scope already has fails, as in Claude Code, in either file. `list` and `get` print Claude
 Code's statuses after connecting to each server: here for local servers, and for remote ones through
-the helper's `probe` command on the remote machine, one ssh call for all of them. `claude mcp serve`
-and `add-from-claude-desktop` are not available.
+the helper's `probe` command on the remote machine, one ssh call for all of them.
+`add-from-claude-desktop` reads Claude Desktop's configuration on this machine (macOS, or WSL's
+Windows user folder) and offers its stdio servers in Claude Code's picker. `claude mcp serve` is not
+available.
 
 On a name clash the host's servers win, then claudette's own (local scope over user scope), then
 `~/.claude.json`'s local scope, the project's `.mcp.json`, and `~/.claude.json`'s user scope.

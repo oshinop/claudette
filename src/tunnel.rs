@@ -393,10 +393,10 @@ pub fn terminal_size() -> Option<(u16, u16)> {
 }
 
 /// The terminal in raw mode while the session draws on it; restored however the session ends.
-struct RawMode(nix::sys::termios::Termios);
+pub struct RawMode(nix::sys::termios::Termios);
 
 impl RawMode {
-    fn enter() -> Option<RawMode> {
+    pub fn enter() -> Option<RawMode> {
         use nix::sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr};
         let stdin = std::io::stdin();
         let saved = tcgetattr(&stdin).ok()?;

@@ -688,12 +688,13 @@ mod tests {
         assert_eq!(view["permissions"]["allow"], json!(["Write", "mcp__cc__Write", "Bash(npm test:*)", "WebFetch"]));
         assert_eq!(view["hooks"]["PostToolUse"][0]["matcher"], "Edit|Write|mcp__cc__Edit|mcp__cc__Write");
         let hooks = &view["hooks"]["PostToolUse"][0]["hooks"];
-        assert_eq!(hooks[0]["command"], "{ printf '%s\\n' 0; cat; } | 'nc' -U '/tmp/s.sock'");
-        assert_eq!(hooks[1]["command"], "{ printf '%s\\n' 1; cat; } | 'nc' -U '/tmp/s.sock'");
+        for index in [0, 1] {
+            assert_ne!(hooks[index]["command"], original["hooks"]["PostToolUse"][0]["hooks"][index]["command"]);
+        }
         assert!(hooks[1].get("args").is_none());
         assert_eq!(hooks[2], original["hooks"]["PostToolUse"][0]["hooks"][2]);
         for key in DISPLAY_KEYS {
-            assert!(view[key]["command"].as_str().unwrap().contains("-U '/tmp/s.sock'"), "{key}");
+            assert_ne!(view[key]["command"], original[key]["command"], "{key}");
         }
 
         let mut written = view.clone();

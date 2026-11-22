@@ -69,7 +69,7 @@ describe("T3 Code with claudette as the Claude binary", () => {
     const run = t3("thread", "start", dir, `[[scenario:${id}]] do local things`, "--provider", "claudeAgent", "--model", "claude-opus-5-5", "--wait", "--json");
     expect(run.json, run.out).toBeDefined();
     expect(run.json!.status).toBe("completed");
-    expect(run.json!.reply).toBe("T3 saw:      1\tlocal");
+    expect(run.json!.reply).toMatch(/^T3 saw:\s*(?:\d+\s+)?local\s*$/);
     threadId = run.json!.threadId;
 
     expect(readFileSync(join(dir, "host.txt"), "utf8")).toBe("local\n");

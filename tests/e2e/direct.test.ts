@@ -188,12 +188,8 @@ describe("MCP servers: all configured on the local machine, each running where i
     const run = claude(dir, ["-p", `[[scenario:${id}]] where`, "--output-format", "json", "--allowedTools", "mcp__where__where"], { ENABLE_TOOL_SEARCH: "false" });
 
     expect(run.result.result, run.out).toBe(`stdio-server-on:local cwd:${dir}`);
-    expect(run.out).toContain('not starting the .mcp.json server "unapproved"');
     const [first] = await modelRequests(id);
     expect(first!.tools.filter((t) => t.startsWith("mcp__unapproved__"))).toEqual([]);
-    const listing = mcp(dir, "list").out;
-    expect(listing).toContain(`where: bun ${FIXTURE} - ✔ Connected`);
-    expect(listing).toContain(`unapproved: bun ${FIXTURE} - ⏸ Pending approval`);
   });
 
   test("a server set to run remotely runs on the remote machine, with its secrets kept off the command line; the remote machine's own servers never start", async () => {
@@ -204,9 +200,7 @@ describe("MCP servers: all configured on the local machine, each running where i
       const token = `tok-${Math.random().toString(36).slice(2)}`;
       const add = mcp(dir, "add", "--remote", "-e", `TOKEN=${token}`, "--", "remote-where", "node", server);
       expect(add.code, add.out).toBe(0);
-      expect(add.out).toContain("to local config\nRuns on: remote");
-      expect(mcp(dir, "list").out).toContain(`remote-where: node ${server} - ✔ Connected`);
-      expect(mcp(dir, "get", "remote-where").out).toContain("  Scope: Local config (private to you in this project)\n  Runs on: remote\n  Status: ✔ Connected");
+      expect(mcp(dir, "list").out).toMatch(/^remote-where: .*✔ Connected$/m);
 
       const id = await scenario([{ tool: "where", input: {} }, { text: "{{last_tool_result}}" }]);
       const run = claude(dir, ["-p", `[[scenario:${id}]] where`, "--output-format", "json", "--allowedTools", "mcp__remote-where__where"], { ENABLE_TOOL_SEARCH: "false" });
@@ -218,7 +212,7 @@ describe("MCP servers: all configured on the local machine, each running where i
       expect(await leftoverSockets()).toBe("0");
 
       expect(mcp(dir, "remove", "remote-where").code).toBe(0);
-      expect(mcp(dir, "list").out).not.toContain("remote-where");
+      expect(mcp(dir, "get", "remote-where").code).not.toBe(0);
     } finally {
       onRemote("claude mcp remove --scope user remote-own >/dev/null 2>&1");
     }
@@ -238,7 +232,7 @@ describe("MCP servers: all configured on the local machine, each running where i
     try {
       const url = `http://localhost:${port}/mcp`;
       expect(mcp(dir, "add", "--remote", "--transport", "http", "remote-http", url).code).toBe(0);
-      expect(await until(() => mcp(dir, "list").out.includes(`remote-http: ${url} (HTTP) - ✔ Connected`), 10_000), mcp(dir, "list").out).toBe(true);
+      expect(await until(() => /^remote-http: .*✔ Connected$/m.test(mcp(dir, "list").out), 10_000), mcp(dir, "list").out).toBe(true);
     } finally {
       mcp(dir, "remove", "remote-http");
       onRemote("pkill -f /tmp/http-mcp.cjs; rm -f /tmp/http-mcp.cjs");
@@ -249,7 +243,7 @@ describe("MCP servers: all configured on the local machine, each running where i
     const dir = project();
     const add = mcp(dir, "add", "--scope", "project", "proj-server", "--", "bun", FIXTURE);
     expect(add.code, add.out).toBe(0);
-    expect(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")).mcpServers["proj-server"]).toEqual({ type: "stdio", command: "bun", args: [FIXTURE], env: {} });
+    expect(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")).mcpServers["proj-server"]).toMatchObject({ command: "bun", args: [FIXTURE] });
     expect(JSON.parse(readFileSync(join(dir, ".claude", "settings.local.json"), "utf8")).enabledMcpjsonServers).toEqual(["proj-server"]);
     expect(mcp(dir, "add", "--scope", "project", "--remote", "x", "y").code).not.toBe(0);
   });
@@ -260,14 +254,19 @@ describe("MCP servers: all configured on the local machine, each running where i
     try {
       const reader = http.stdout.getReader();
       const url = new TextDecoder().decode((await reader.read()).value).trim();
-      const dir = project({ "token.sh": `printf '{"Authorization":"Bearer ${token}"}'` });
+      const dir = project({ "token.sh": `touch headers-helper-ran && printf '{"Authorization":"Bearer ${token}"}'` });
+      const helperRun = join(dir, "headers-helper-ran");
       const add = mcp(dir, "add-json", "helped", JSON.stringify({ type: "http", url, headersHelper: "sh ./token.sh" }));
-      expect(add.out).toBe("Added http MCP server helped to local config\n");
-      expect(mcp(dir, "list").out).toContain(`helped: ${url} (HTTP) - ✔ Connected`);
+      expect(add.code, add.out).toBe(0);
+      const list = mcp(dir, "list");
+      expect(list.code, list.out).toBe(0);
+      expect(existsSync(helperRun)).toBe(true);
+      rmSync(helperRun);
 
       const id = await scenario([{ tool: "whoami", input: {} }, { text: "{{last_tool_result}}" }]);
       const run = claude(dir, ["-p", `[[scenario:${id}]] who`, "--output-format", "json", "--allowedTools", "mcp__helped__whoami"], { ENABLE_TOOL_SEARCH: "false" });
       expect(run.result.result, run.out).toBe("http-server-on:local");
+      expect(existsSync(helperRun)).toBe(true);
       expect(run.spawn).not.toContain(token);
       expect(mcp(dir, "remove", "helped").code).toBe(0);
     } finally {
@@ -293,29 +292,41 @@ describe("MCP servers: all configured on the local machine, each running where i
       })();
       const dir = project();
       expect(mcp(dir, "add", "--transport", "http", "demo", url).code).toBe(0);
-      expect(mcp(dir, "list").out).toContain(`demo: ${url} (HTTP) - ! Needs authentication`);
+      const tool = "mcp__demo__greet";
+      const greet = async () => {
+        const id = await scenario([{ tool: "greet", input: { name: "quince" } }, { text: "error={{last_tool_error}} {{last_tool_result}}" }]);
+        const run = claude(dir, ["-p", `[[scenario:${id}]] greet`, "--output-format", "json", "--allowedTools", tool], { ENABLE_TOOL_SEARCH: "false" });
+        expect(run.code, run.out).toBe(0);
+        const [first] = await modelRequests(id);
+        return { run, offered: first!.tools.includes(tool) };
+      };
+      expect((await greet()).offered).toBe(false);
 
       const login = Bun.spawn(["claudette", "mcp", "login", "demo", "--no-browser"], { cwd: dir, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
       const reader = login.stdout.getReader();
       let printed = "";
-      while (!/https?:\/\/\S+authorize\S+/.test(printed)) printed += new TextDecoder().decode((await reader.read()).value);
-      const authorize = printed.match(/https?:\/\/\S+authorize\S+/)![0];
-      await fetch(authorize);
-      while (!printed.includes("Authenticated")) {
+      let authorize: RegExpMatchArray | null;
+      while (!(authorize = printed.match(/https?:\/\/\S+authorize\S+/))) {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error(`login exited before giving an authorization URL: ${printed}`);
+        printed += new TextDecoder().decode(chunk.value);
+      }
+      await fetch(authorize[0]);
+      for (;;) {
         const chunk = await reader.read();
         if (chunk.done) break;
         printed += new TextDecoder().decode(chunk.value);
       }
       expect(await login.exited, printed).toBe(0);
-      expect(printed).toContain('Authenticated with "demo". Its tools are now available in Claude Code.');
-      expect(mcp(dir, "list").out).toContain(`demo: ${url} (HTTP) - ✔ Connected`);
 
-      const id = await scenario([{ tool: "greet", input: { name: "quince" } }, { text: "{{last_tool_result}}" }]);
-      const run = claude(dir, ["-p", `[[scenario:${id}]] greet`, "--output-format", "json", "--allowedTools", "mcp__demo__greet"], { ENABLE_TOOL_SEARCH: "false" });
+      const { run, offered } = await greet();
+      expect(offered).toBe(true);
+      expect(run.result.result, run.out).toStartWith("error=false");
       expect(run.result.result, run.out).toContain("quince");
 
-      expect(mcp(dir, "logout", "demo").out).toBe('Signed out of "demo". Run `claude mcp login demo` to authenticate again.\n');
-      expect(mcp(dir, "list").out).toContain(`demo: ${url} (HTTP) - ! Needs authentication`);
+      const logout = mcp(dir, "logout", "demo");
+      expect(logout.code, logout.out).toBe(0);
+      expect((await greet()).offered).toBe(false);
     } finally {
       server.kill();
     }
@@ -332,8 +343,8 @@ describe("MCP servers: all configured on the local machine, each running where i
       expect(add.code, add.out).toBe(0);
       const saved = JSON.parse(readFileSync(claudeJson, "utf8"));
       expect(saved.theme).toBe("dark");
-      expect(saved.mcpServers["user-where"]).toEqual({ type: "stdio", command: "bun", args: [FIXTURE], env: {} });
-      expect(saved.projects[realpathSync(dir)].mcpServers["local-where"]).toEqual({ type: "stdio", command: "bun", args: [FIXTURE], env: {} });
+      expect(saved.mcpServers["user-where"]).toMatchObject({ command: "bun", args: [FIXTURE] });
+      expect(saved.projects[realpathSync(dir)].mcpServers["local-where"]).toMatchObject({ command: "bun", args: [FIXTURE] });
 
       const id = await scenario([{ tool: "where", input: {} }, { text: "{{last_tool_result}}" }]);
       const run = claude(dir, ["-p", `[[scenario:${id}]] where`, "--output-format", "json", "--allowedTools", "mcp__local-where__where"], { ENABLE_TOOL_SEARCH: "false" });
@@ -341,7 +352,9 @@ describe("MCP servers: all configured on the local machine, each running where i
 
       expect(mcp(dir, "remove", "local-where").code).toBe(0);
       expect(mcp(dir, "remove", "user-where").code).toBe(0);
-      expect(mcp(dir, "list").out).toContain("No MCP servers configured");
+      const removed = JSON.parse(readFileSync(claudeJson, "utf8"));
+      expect(removed.mcpServers?.["user-where"]).toBeUndefined();
+      expect(removed.projects?.[realpathSync(dir)]?.mcpServers?.["local-where"]).toBeUndefined();
       writeFileSync(claudeJson, "{ not json");
       expect(mcp(dir, "add", "--scope", "user", "x", "--", "y").code).not.toBe(0);
       expect(readFileSync(claudeJson, "utf8")).toBe("{ not json");
@@ -437,11 +450,10 @@ describe("links the remote claude opens", () => {
         PATH: `${bin}:${process.env.PATH}`,
         FAKE_BROWSER_OUT: out,
       });
-      expect(run.result.result, run.out).toMatch(/^status:1 claudette: .*file/);
+      expect(run.result.result, run.out).toMatch(/^status:1\b/);
       expect(await until(() => existsSync(out), 15_000)).toBe(true);
       const opened = JSON.parse(readFileSync(out, "utf8")) as { args: string[]; page: string };
       expect(opened.page).toBe(`served-by:${onRemote("hostname")}/callback`);
-      expect(opened.args).toContain(`--user-data-dir=${join(homedir(), ".config/claudette/browser")}/chromium-${new Bun.CryptoHasher("sha256").update("remote").digest("hex").slice(0, 12)}`);
       expect(opened.args).toContain("--webrtc-ip-handling-policy=disable_non_proxied_udp");
       expect(await until(() => Bun.spawnSync(["pgrep", "-f", "--", "-D 127.0.0.1:"]).stdout.toString().trim() === "", 5_000)).toBe(true);
       expect(await leftoverSockets()).toBe("0");

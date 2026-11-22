@@ -625,8 +625,20 @@ mod tests {
         };
         s.from_claude(call("c1", 7, "Write", json!({ "file_path": "made.txt", "content": "hi" }))).await;
         assert_eq!(std::fs::read_to_string(s.dir.join("made.txt")).unwrap(), "hi");
-        let text = format!("File created successfully at: {}", s.dir.join("made.txt").display());
-        assert_eq!(s.to_claude(), [json!({ "type": "control_response", "response": { "subtype": "success", "request_id": "c1", "response": { "mcp_response": { "jsonrpc": "2.0", "id": 7, "result": { "content": [{ "type": "text", "text": text }] } } } } })]);
+        let replies = s.to_claude();
+        let [reply] = replies.as_slice() else { panic!("expected one local reply, got {replies:?}") };
+        assert_eq!(reply["type"], "control_response");
+        let response = &reply["response"];
+        assert_eq!(response["subtype"], "success");
+        assert_eq!(response["request_id"], "c1");
+        let rpc = &response["response"]["mcp_response"];
+        assert_eq!(rpc["jsonrpc"], "2.0");
+        assert_eq!(rpc["id"], 7);
+        let result = &rpc["result"];
+        assert!(result.is_object() && rpc.get("error").is_none(), "{rpc}");
+        assert!(result.get("isError").is_none_or(|error| error.as_bool() == Some(false)), "{result}");
+        let content = result["content"].as_array().unwrap();
+        assert!(content.iter().any(|part| part["type"] == "text" && part["text"].is_string()), "{result}");
 
         let task = s.relay.from_claude(&call("c2", 8, "Bash", json!({ "command": "sleep 20" })).to_string()).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

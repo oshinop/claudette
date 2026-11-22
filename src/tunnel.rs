@@ -585,16 +585,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_start_command_runs_the_cached_build_for_the_machines_platform_or_names_the_platform() {
-        let builds = vec![Build { platform: "linux-arm64".into(), file: std::fs::File::open("/dev/null").unwrap(), sha: "0123456789abcdef".repeat(4) }];
+    fn the_start_command_names_the_platform_when_the_cached_build_is_missing() {
+        let builds = [Build { platform: platform().into(), file: std::fs::File::open("/dev/null").unwrap(), sha: "0123456789abcdef".repeat(4) }];
         let script = connect_script(&builds, "00000000000000ab", true);
-        assert!(script.contains("linux-arm64) h=0123456789abcdef;;"));
-        assert!(script.contains("__helper connect '00000000000000ab' --spawn"));
-        assert!(script.ends_with(&format!("echo \"{MISSING} $p\"")));
-        let out = std::process::Command::new("sh").arg("-c").arg(script.replace("$HOME", "/nonexistent")).output().unwrap();
-        let line = String::from_utf8_lossy(&out.stdout);
-        assert!(line.starts_with(MISSING), "{line}");
-        assert!(!connect_script(&builds, "00000000000000ab", false).contains("--spawn"));
+        let out = std::process::Command::new("sh").arg("-c").arg(script).env("HOME", "/dev/null").output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let line = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(line.trim().strip_prefix(MISSING).map(str::trim), Some(platform()));
     }
 
     #[test]

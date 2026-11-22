@@ -325,7 +325,11 @@ mod tests {
         assert!(remote_args(&investigate, &RemoteExtras::default()).contains(&"--tools=".into()));
         let web = parse_args(&s(&["--tools", "Read,WebFetch,Monitor"]), Path::new("/w")).unwrap();
         assert!(remote_args(&web, &RemoteExtras::default()).contains(&"--tools=WebFetch".into()));
-        assert_eq!(parse_args(&s(&["--tools=default"]), Path::new("/w")).unwrap().local_tools.len(), 9);
+        let mut default_tools = parse_args(&s(&["--tools=default"]), Path::new("/w")).unwrap().local_tools;
+        let mut all_local_tools = LOCAL_TOOLS;
+        default_tools.sort_unstable();
+        all_local_tools.sort_unstable();
+        assert_eq!(default_tools, all_local_tools);
         let approved = parse_args(&s(&["--allowedTools", "Edit,Bash", "--disallowedTools", "Bash"]), Path::new("/w")).unwrap();
         assert_eq!(
             remote_args(&approved, &RemoteExtras::default()).iter().find(|a| a.starts_with("--allowedTools")).unwrap(),
@@ -349,7 +353,6 @@ mod tests {
 
     #[test]
     fn a_config_file_that_is_not_on_this_machine_fails_loudly() {
-        let err = parse_args(&s(&["--mcp-config", "/no/such/file.json"]), Path::new("/")).unwrap_err();
-        assert!(err.to_string().contains("no such file on this machine"));
+        assert!(parse_args(&s(&["--mcp-config", "/no/such/file.json"]), Path::new("/")).is_err());
     }
 }

@@ -330,25 +330,29 @@ mod tests {
         (agent, got)
     }
 
-    fn content(line: &Value) -> String {
-        line["message"]["content"].as_str().unwrap().to_owned()
+    fn content(line: &Value) -> &str {
+        line["message"]["content"].as_str().unwrap()
     }
 
     #[tokio::test]
     async fn sessions_find_each_other_by_asking_and_messages_arrive_marked_with_the_sender() {
         let root = root();
-        let (api, _) = session(&root, "aaaaaa", "api", "/w/api");
+        let (api, api_got) = session(&root, "aaaaaa", "api", "/w/api");
         let (web, web_got) = session(&root, "bbbbbb", "web", "/w/web");
         let peers = list(&root, api.socket().map(PathBuf::as_path)).await;
         assert_eq!(peers.iter().map(Peer::label).collect::<Vec<_>>(), ["web [bbbbbb]"]);
         assert_eq!((peers[0].project.as_path(), peers[0].status.as_str()), (Path::new("/w/web"), "idle"));
 
-        let (to, _) = send(&root, &api, "web", Some("schema changed"), false).await.unwrap();
+        let message = "schema changed";
+        let (to, _) = send(&root, &api, "web", Some(message), false).await.unwrap();
         assert_eq!(to, "web [bbbbbb]");
         let line = web_got.lock().unwrap()[0].clone();
         assert_eq!((line["type"].as_str(), line["from"].as_str()), (Some("user"), Some("api [aaaaaa]")));
-        assert!(content(&line).starts_with("schema changed\n\n(From session api [aaaaaa], working in /w/api."));
-        assert_eq!(send(&root, &api, "api [aaaaaa]", Some("x"), false).await.unwrap_err(), "That is this session.");
+        let delivered = content(&line);
+        assert!(delivered.contains(message), "{delivered}");
+        assert!(delivered.contains("/w/api"), "{delivered}");
+        assert!(send(&root, &api, "api [aaaaaa]", Some("x"), false).await.is_err());
+        assert!(api_got.lock().unwrap().is_empty());
         let _ = web;
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -357,14 +361,22 @@ mod tests {
     async fn same_names_need_the_id_and_unknown_names_list_what_there_is() {
         let root = root();
         let (me, _) = session(&root, "aaaaaa", "me", "/w/me");
-        let (_one, _) = session(&root, "bbbbbb", "app", "/w/app");
-        let (_two, two_got) = session(&root, "cccccc", "app", "/w/app2");
+        let (one, one_got) = session(&root, "bbbbbb", "app", "/w/app");
+        let (two, two_got) = session(&root, "cccccc", "app", "/w/app2");
         let err = send(&root, &me, "app", Some("hi"), false).await.unwrap_err();
-        assert!(err.contains("\"app [bbbbbb]\", \"app [cccccc]\""), "{err}");
-        send(&root, &me, "cccccc", Some("hi"), false).await.unwrap();
-        assert_eq!(two_got.lock().unwrap().len(), 1);
+        for candidate in [&one, &two] {
+            assert!(err.contains(candidate.id.as_str()), "{err}");
+        }
+        let message = "the build is ready for review";
+        send(&root, &me, "cccccc", Some(message), false).await.unwrap();
         let err = send(&root, &me, "nope", Some("hi"), false).await.unwrap_err();
-        assert!(err.contains("Sessions: app [bbbbbb], app [cccccc]."), "{err}");
+        for candidate in [&one, &two] {
+            assert!(err.contains(candidate.id.as_str()), "{err}");
+        }
+        assert!(one_got.lock().unwrap().is_empty());
+        let received = two_got.lock().unwrap();
+        let [line] = received.as_slice() else { panic!("expected only the message addressed by ID, got {received:?}") };
+        assert!(content(line).contains(message));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -383,11 +395,14 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(content(&me_got.lock().unwrap()[0]).starts_with("Session busy [bbbbbb] (/w/busy) is idle"));
+        let received = std::mem::take(&mut *me_got.lock().unwrap());
+        let [notice] = received.as_slice() else { panic!("expected one notice from the idle session, got {received:?}") };
+        assert_eq!(notice["type"], "user");
+        assert_eq!(notice["from"], busy.label());
         busy.set_status(Status::Working);
         busy.set_status(Status::Idle);
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(me_got.lock().unwrap().len(), 1, "one notice per request");
+        assert!(me_got.lock().unwrap().is_empty(), "one notice per request");
         std::fs::remove_dir_all(root).unwrap();
     }
 

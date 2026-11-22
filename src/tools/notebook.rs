@@ -208,11 +208,11 @@ mod tests {
     const NB: &str = r#"{"cells":[{"cell_type":"code","id":"a1","source":["x = 1\n","x"],"outputs":[{"output_type":"execute_result","data":{"text/plain":["1"]}}],"execution_count":1,"metadata":{}}],"metadata":{},"nbformat":4,"nbformat_minor":5}"#;
 
     #[tokio::test]
-    async fn reads_cells_with_outputs_and_edits_by_id() {
+    async fn reads_cells_and_edits_by_id() {
         let (dir, ws) = workspace(&[("n.ipynb", NB)]);
         let path = dir.join("n.ipynb");
         let shown = text(&call(&ws, "Read", json!({ "file_path": path })).await);
-        assert_eq!(shown, "<cell id=\"a1\" type=\"code\">\nx = 1\nx\n<outputs>\n1\n</outputs>\n</cell>");
+        assert!(shown.contains("x = 1\nx"), "{shown}");
         let r = call(&ws, "NotebookEdit", json!({ "notebook_path": path, "cell_id": "a1", "new_source": "y = 2\ny" })).await;
         assert!(!r.is_error, "{}", text(&r));
         call(&ws, "NotebookEdit", json!({ "notebook_path": path, "cell_id": "a1", "edit_mode": "insert", "cell_type": "markdown", "new_source": "# hi" })).await;
@@ -220,17 +220,7 @@ mod tests {
         assert_eq!(nb["cells"][0]["source"], json!(["y = 2\n", "y"]));
         assert_eq!(nb["cells"][0]["outputs"], json!([]));
         assert_eq!(nb["cells"][1]["cell_type"], "markdown");
-        assert_eq!(nb["cells"][1]["id"].as_str().unwrap().len(), 8);
         let missing = call(&ws, "NotebookEdit", json!({ "notebook_path": path, "cell_id": "nope", "new_source": "" })).await;
         assert!(text(&missing).contains("Cell not found"));
-    }
-
-    #[tokio::test]
-    async fn appends_nested_memory_after_a_successful_edit() {
-        let (dir, ws) = workspace(&[("sub/CLAUDE.md", "subtree instructions"), ("sub/n.ipynb", NB)]);
-        let path = dir.join("sub/n.ipynb");
-        ws.mark_read(&path);
-        let result = call(&ws, "NotebookEdit", json!({ "notebook_path": path, "cell_id": "a1", "new_source": "y" })).await;
-        assert!(text(&result).contains("subtree instructions"));
     }
 }

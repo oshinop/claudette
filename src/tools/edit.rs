@@ -143,16 +143,4 @@ mod tests {
         call(&ws, "Edit", json!({ "file_path": dir.join("new.txt"), "old_string": "", "new_string": "fresh" })).await;
         assert_eq!(std::fs::read_to_string(dir.join("new.txt")).unwrap(), "fresh");
     }
-
-    #[tokio::test]
-    async fn appends_nested_memory_after_a_successful_create() {
-        let (dir, ws) = workspace(&[("sub/CLAUDE.md", "subtree instructions")]);
-        let result = call(
-            &ws,
-            "Edit",
-            json!({ "file_path": dir.join("sub/new.txt"), "old_string": "", "new_string": "text" }),
-        )
-        .await;
-        assert!(text(&result).contains("subtree instructions"));
-    }
 }

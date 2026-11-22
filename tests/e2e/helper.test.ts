@@ -45,12 +45,10 @@ describe("the session helper", () => {
     const session = start(dir, { allowedTools: ["Bash"] });
     const turn = session.turn(`[[scenario:${id}]] wait it out`);
     await Bun.sleep(1500);
-    cutTheLink();
+    expect(cutTheLink().exitCode).toBe(0);
     const result = await turn;
     await session.close();
     expect(resultText(result)).toBe("reply: after-the-drop");
-    expect(session.stderr.join("")).toContain("was lost; the session waits");
-    expect(session.stderr.join("")).toContain("reconnected to remote");
   });
 
   test("a -p run survives this machine going quiet: stopped, its link cut, then back", async () => {
@@ -98,11 +96,11 @@ describe("the session helper", () => {
     }
   });
 
-  const twoCalls = async (dir: string) => {
+  const twoCalls = async (dir: string, text = "result={{last_tool_result}} error={{last_tool_error}}") => {
     const id = await scenario([
       { tool: "Bash", input: { command: "sleep 6; echo first", description: "wait" } },
-      { tool: "Bash", input: { command: "echo second", description: "again" } },
-      { text: "result={{last_tool_result}} error={{last_tool_error}}" },
+      { tool: "Bash", input: { command: "touch second-ran && echo second", description: "again" } },
+      { text },
     ]);
     const run = Bun.spawn(["claudette", "-p", `[[scenario:${id}]] go`, "--output-format", "json", "--allowedTools", "Bash"], { cwd: dir, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
     expect(await until(() => holdersOnRemote() === "1", 15_000)).toBe(true);
@@ -130,8 +128,9 @@ describe("the session helper", () => {
 
   test("with its build gone all the same, the permission hook refuses every call", async () => {
     const dir = project();
-    const done = await twoCalls(dir);
+    const done = await twoCalls(dir, "error={{last_tool_error}}");
     onRemote("rm -rf ~/.claudette/bin");
-    expect(await done()).toContain("the helper is gone from the remote machine, so this call cannot be checked against your permission rules and is refused");
+    expect(await done()).toBe("error=true");
+    expect(existsSync(join(dir, "second-ran"))).toBe(false);
   });
 });

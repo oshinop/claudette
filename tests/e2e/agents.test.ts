@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { modelRequests, onRemote, project, scenario, start } from "./harness";
@@ -7,15 +7,13 @@ import { modelRequests, onRemote, project, scenario, start } from "./harness";
 const MOCK = process.env.MOCK_API ?? "http://mockapi:8080";
 
 function runP(dir: string, prompt: string, env: Record<string, string> = {}) {
-  const log = join(mkdtempSync(join(tmpdir(), "log-")), "claudette.log");
-  const proc = Bun.spawnSync(["claudette", "-p", prompt, "--output-format", "json"], { cwd: dir, env: { ...process.env, CLAUDETTE_LOG: log, ...env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawnSync(["claudette", "-p", prompt, "--output-format", "json"], { cwd: dir, env: { ...process.env, ...env }, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   let result = "";
   try {
     result = (JSON.parse(proc.stdout.toString()) as { result?: string }).result ?? "";
   } catch {
   }
-  const spawn = readFileSync(log, "utf8").split("\n").find((l) => l.includes('"dir":"spawn"')) ?? "";
-  return { code: proc.exitCode, result, spawn, out: `${proc.stdout}\n${proc.stderr}` };
+  return { code: proc.exitCode, result, out: `${proc.stdout}\n${proc.stderr}` };
 }
 
 async function requestsWith(text: string) {
@@ -125,14 +123,35 @@ describe("what stays off", () => {
     for (const args of [["agents"], ["attach", "abc"], ["stop", "abc"], ["--bg", "do it"]]) {
       const run = Bun.spawnSync(["claudette", ...args], { cwd: dir, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
       expect(run.exitCode, args.join(" ")).not.toBe(0);
-      expect(run.stderr.toString()).toContain("manages background sessions");
-      expect(run.stderr.toString()).toContain("tmux");
     }
-    const run = runP(dir, "hi", { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1" });
-    expect(run.code, run.out).toBe(0);
-    expect(run.spawn.match(/CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS[=\\":]{1,12}0/g)?.length, run.spawn).toBe(2);
-    expect(run.spawn.match(/CLAUDE_CODE_DISABLE_AGENT_VIEW[=\\":]{1,12}1/g)?.length, run.spawn).toBe(2);
-    expect(run.spawn).toMatch(/disableAgentView[\\":]{1,12}true/);
+    const probe = "/tmp/probe-agent-settings";
+    onRemote(`cat > ${probe} <<'EOF'
+#!/bin/sh
+node -e '
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const { values } = require("node:util").parseArgs({ args: process.argv.slice(1), options: { settings: { type: "string" } }, strict: false, allowPositionals: true });
+assert.ok(values.settings);
+const settings = JSON.parse(fs.readFileSync(values.settings, "utf8"));
+for (const [key, value] of Object.entries({ CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0", CLAUDE_CODE_DISABLE_AGENT_VIEW: "1" })) {
+  assert.equal(process.env[key], value, key);
+  assert.equal(settings.env?.[key], value, key);
+}
+assert.equal(settings.disableAgentView, true);
+' -- "$@" || exit $?
+exec claude "$@"
+EOF
+chmod 755 ${probe}`);
+    try {
+      const run = runP(dir, "hi", {
+        CLAUDETTE_REMOTE_CLAUDE: probe,
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1",
+        CLAUDE_CODE_DISABLE_AGENT_VIEW: "0",
+      });
+      expect(run.code, run.out).toBe(0);
+    } finally {
+      onRemote(`rm -f ${probe}`);
+    }
     expect(onRemote("ls -d /tmp/claudette-*.inbox 2>/dev/null | wc -l")).toBe("0");
   });
 });

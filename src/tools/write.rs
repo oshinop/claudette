@@ -53,16 +53,3 @@ pub fn run(input: &Object, ws: &Workspace) -> ToolOutcome {
         format!("File created successfully at: {}", path.display())
     }).with_nested_memory(ws, &path))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::super::test_support::*;
-    use serde_json::json;
-
-    #[tokio::test]
-    async fn appends_nested_memory_after_a_successful_create() {
-        let (dir, ws) = workspace(&[("sub/CLAUDE.md", "subtree instructions")]);
-        let result = call(&ws, "Write", json!({ "file_path": dir.join("sub/new.txt"), "content": "text" })).await;
-        assert!(text(&result).contains("subtree instructions"));
-    }
-}

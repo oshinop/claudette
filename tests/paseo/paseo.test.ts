@@ -46,9 +46,10 @@ describe("Paseo with claudette as the Claude command", () => {
 
     expect(readFileSync(join(dir, "host.txt"), "utf8")).toBe("local\n");
     expect(onRemote(`ls -A ${remoteDir(dir)}`)).toBe("");
-    expect(paseo("logs", agentId).out).toContain("PASEO saw:      1\tlocal");
+    expect(paseo("logs", agentId).out).toMatch(/PASEO saw:\s*(?:\d+\s+)?local\b/);
     const [first] = await modelRequests(id);
-    expect(first!.tools.filter((t) => t.startsWith("mcp__cc__")).length).toBeGreaterThan(0);
+    expect(first!.tools).toContain("mcp__cc__Bash");
+    expect(first!.tools).toContain("mcp__cc__Read");
   });
 
   test("after a daemon restart the agent continues the same Claude conversation", async () => {

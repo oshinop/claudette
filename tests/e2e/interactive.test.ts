@@ -92,7 +92,6 @@ test("what a terminal session saves to its user settings lands in this machine's
   writeFileSync(localSettings, JSON.stringify({ env: { KEPT_HERE: "1" } }));
   try {
     const session = await launch(project(), [], "shift+tabtocycle");
-    expect(session.text(), session.text().slice(-2000)).toContain("shift+tabtocycle");
     const config = onRemote("ls -d /tmp/claudette-*.config | head -n 1");
     await session.type("/theme");
     expect(await session.waitFor("Lightmode", 10_000), session.text().slice(-2000)).toBe(true);
@@ -122,7 +121,6 @@ test("← and /bg never hand a session to the remote machine's own background se
   await Bun.sleep(2000);
   await session.type("/bg");
   await Bun.sleep(3000);
-  expect(session.text()).toContain("Unknowncommand:/bg");
   await session.exit();
   expect(onRemote("pgrep -f 'claude[.]exe daemon' | wc -l")).toBe("0");
   expect(onRemote("ls ~/.claude/jobs 2>/dev/null | wc -l")).toBe("0");

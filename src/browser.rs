@@ -28,57 +28,46 @@ const SESSIONS: &str = "claudette-sessions";
 const LAUNCH: &str = "claudette-launch";
 
 pub const GATE_TOKEN_BYTES: usize = 16;
+const SEED_BYTES: usize = 16;
+const SEED: &str = "claudette-seed";
+const WINDOWS: [(u32, u32); 6] = [(1000, 700), (1200, 700), (1200, 800), (1400, 800), (1400, 900), (1600, 900)];
+const CORES: [usize; 6] = [4, 6, 8, 10, 12, 16];
+const BRAVE_WEBRTC_POLICY: &str = "disable_non_proxied_udp";
 
 static JOINED: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Family {
-    Chromium,
+enum Kind {
     Firefox,
+    Brave,
 }
 
-impl Family {
+impl Kind {
+    fn id(self) -> &'static str {
+        match self {
+            Kind::Firefox => "firefox",
+            Kind::Brave => "brave",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Firefox => "Firefox",
+            Kind::Brave => "Brave",
+        }
+    }
+
     fn min_version(self) -> u32 {
         match self {
-            Family::Chromium => 105,
-            Family::Firefox => 107,
+            Kind::Firefox => 148,
+            Kind::Brave => 105,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Kind {
-    id: &'static str,
-    name: &'static str,
-    family: Family,
-    extra: &'static [&'static str],
-}
+const MACOS: [(&str, Kind); 2] = [("Firefox.app/Contents/MacOS/firefox", Kind::Firefox), ("Brave Browser.app/Contents/MacOS/Brave Browser", Kind::Brave)];
 
-const CHROME: Kind = Kind { id: "chrome", name: "Google Chrome", family: Family::Chromium, extra: &[] };
-const CHROMIUM: Kind = Kind { id: "chromium", name: "Chromium", family: Family::Chromium, extra: &[] };
-const BRAVE: Kind = Kind { id: "brave", name: "Brave", family: Family::Chromium, extra: &["--disable-brave-update", "--disable-tor-client-updater-extension"] };
-const EDGE: Kind = Kind { id: "edge", name: "Microsoft Edge", family: Family::Chromium, extra: &[] };
-const FIREFOX: Kind = Kind { id: "firefox", name: "Firefox", family: Family::Firefox, extra: &[] };
-
-const MACOS: [(&str, Kind); 5] = [
-    ("Google Chrome.app/Contents/MacOS/Google Chrome", CHROME),
-    ("Chromium.app/Contents/MacOS/Chromium", CHROMIUM),
-    ("Brave Browser.app/Contents/MacOS/Brave Browser", BRAVE),
-    ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", EDGE),
-    ("Firefox.app/Contents/MacOS/firefox", FIREFOX),
-];
-
-const LINUX: [(&str, Kind); 9] = [
-    ("google-chrome", CHROME),
-    ("google-chrome-stable", CHROME),
-    ("chromium", CHROMIUM),
-    ("chromium-browser", CHROMIUM),
-    ("brave-browser", BRAVE),
-    ("brave", BRAVE),
-    ("microsoft-edge", EDGE),
-    ("firefox", FIREFOX),
-    ("firefox-esr", FIREFOX),
-];
+const LINUX: [(&str, Kind); 4] = [("firefox", Kind::Firefox), ("firefox-esr", Kind::Firefox), ("brave-browser", Kind::Brave), ("brave", Kind::Brave)];
 
 fn find() -> Option<(PathBuf, Kind)> {
     if cfg!(target_os = "macos") {
@@ -89,6 +78,16 @@ fn find() -> Option<(PathBuf, Kind)> {
     LINUX.iter().find_map(|(name, kind)| std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file()).map(|p| (p, *kind)))
 }
 
+pub fn random<const N: usize>() -> std::io::Result<[u8; N]> {
+    let mut bytes = [0u8; N];
+    std::io::Read::read_exact(&mut File::open("/dev/urandom")?, &mut bytes)?;
+    Ok(bytes)
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn check_url(url: &str) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("not a URL ({e}): {url}"))?;
     match parsed.scheme() {
@@ -97,14 +96,24 @@ pub fn check_url(url: &str) -> Result<reqwest::Url, String> {
     }
 }
 
-pub fn gate_url(request: &str) -> Result<String, String> {
+pub fn valid_time_zone(name: &str) -> bool {
+    name.len() <= 64 && name.split('/').all(|part| !part.is_empty() && part != "." && part != "..") && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_+-/".contains(&b))
+}
+
+struct Open {
+    url: String,
+    time_zone: String,
+}
+
+fn parse_open(request: &str) -> Result<Open, String> {
     let bad = || format!("not a link handed over by claudette's helper: {request}");
-    let (port, token) = request.split_once(' ').ok_or_else(bad)?;
+    let mut parts = request.split(' ');
+    let (Some(port), Some(token), Some(time_zone), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return Err(bad()) };
     let port: u16 = port.parse().ok().filter(|&p| p != 0).ok_or_else(bad)?;
-    if token.len() != 2 * GATE_TOKEN_BYTES || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if token.len() != 2 * GATE_TOKEN_BYTES || !token.bytes().all(|b| b.is_ascii_hexdigit()) || !valid_time_zone(time_zone) {
         return Err(bad());
     }
-    Ok(format!("http://127.0.0.1:{port}/{token}"))
+    Ok(Open { url: format!("http://127.0.0.1:{port}/{token}"), time_zone: time_zone.to_owned() })
 }
 
 fn major_version(text: &str) -> Option<u32> {
@@ -121,19 +130,53 @@ async fn version(program: &Path) -> Result<u32, String> {
     major_version(&text).ok_or_else(|| format!("could not tell which version {} is from {:?}; nothing was opened", program.display(), text.trim()))
 }
 
-fn profile_args(family: Family, profile: &Path) -> Vec<String> {
-    match family {
-        Family::Chromium => vec![format!("--user-data-dir={}", profile.display())],
-        Family::Firefox => vec!["--profile".into(), profile.display().to_string()],
+fn profile_args(kind: Kind, profile: &Path) -> Vec<String> {
+    match kind {
+        Kind::Firefox => vec!["--profile".into(), profile.display().to_string()],
+        Kind::Brave => vec![format!("--user-data-dir={}", profile.display())],
     }
 }
 
-fn chromium_args(port: u16) -> Vec<String> {
+struct Persona {
+    window: (u32, u32),
+    cores: usize,
+    time_zone: String,
+}
+
+impl Persona {
+    fn new(seed: &[u8], time_zone: String) -> Persona {
+        let real = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let fitting: Vec<usize> = CORES.into_iter().filter(|&c| c <= real).collect();
+        let cores = if fitting.is_empty() { real } else { pick(seed, "cores", &fitting) };
+        Persona { window: pick(seed, "window", &WINDOWS), cores, time_zone }
+    }
+}
+
+fn pick<T: Copy>(seed: &[u8], label: &str, from: &[T]) -> T {
+    let digest = Sha256::new().chain_update(seed).chain_update(label).finalize();
+    let n = u64::from_be_bytes(digest[..8].try_into().expect("a SHA-256 digest has 32 bytes"));
+    from[(n % from.len() as u64) as usize]
+}
+
+fn seed(profile: &Path) -> Result<String, String> {
+    let path = profile.join(SEED);
+    if let Ok(text) = std::fs::read_to_string(&path)
+        && text.trim().len() == 2 * SEED_BYTES
+    {
+        return Ok(text.trim().to_owned());
+    }
+    let fail = |e: std::io::Error| format!("could not give the browser for this machine its own fingerprint: {e}; nothing was opened");
+    let fresh = hex(&random::<SEED_BYTES>().map_err(fail)?);
+    std::fs::write(&path, &fresh).map_err(fail)?;
+    Ok(fresh)
+}
+
+fn brave_args(port: u16, persona: &Persona) -> Vec<String> {
+    let (width, height) = persona.window;
     [
         format!("--proxy-server=socks5://127.0.0.1:{port}"),
         "--proxy-bypass-list=<-loopback>".into(),
         "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1".into(),
-        "--webrtc-ip-handling-policy=disable_non_proxied_udp".into(),
         "--disable-quic".into(),
         "--disable-background-networking".into(),
         "--disable-component-update".into(),
@@ -141,78 +184,125 @@ fn chromium_args(port: u16) -> Vec<String> {
         "--disable-breakpad".into(),
         "--disable-domain-reliability".into(),
         "--disable-features=MediaRouter,OptimizationHints".into(),
+        "--disable-brave-update".into(),
+        "--disable-tor-client-updater-extension".into(),
         "--no-pings".into(),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
-        "--accept-lang=en-US".into(),
-        "--disable-accelerated-2d-canvas".into(),
+        "--accept-lang=en-US,en".into(),
+        format!("--window-size={width},{height}"),
     ]
     .into()
 }
 
-fn firefox_prefs(port: u16) -> String {
-    let prefs: [(&str, &str); 35] = [
-        ("network.proxy.type", "1"),
-        ("network.proxy.socks", "\"127.0.0.1\""),
-        ("network.proxy.socks_port", &port.to_string()),
-        ("network.proxy.socks_version", "5"),
-        ("network.proxy.socks_remote_dns", "true"),
-        ("network.proxy.socks5_remote_dns", "true"),
-        ("network.proxy.no_proxies_on", "\"\""),
-        ("network.proxy.allow_hijacking_localhost", "true"),
-        ("network.proxy.failover_direct", "false"),
-        ("network.proxy.allow_bypass", "false"),
-        ("network.dns.disabled", "true"),
-        ("network.trr.mode", "5"),
-        ("network.dns.disablePrefetch", "true"),
-        ("network.prefetch-next", "false"),
-        ("network.predictor.enabled", "false"),
-        ("network.http.speculative-parallel-limit", "0"),
-        ("network.http.http3.enable", "false"),
-        ("media.peerconnection.enabled", "false"),
-        ("network.captive-portal-service.enabled", "false"),
-        ("network.connectivity-service.enabled", "false"),
-        ("browser.safebrowsing.malware.enabled", "false"),
-        ("browser.safebrowsing.phishing.enabled", "false"),
-        ("browser.safebrowsing.downloads.remote.enabled", "false"),
-        ("toolkit.telemetry.enabled", "false"),
-        ("toolkit.telemetry.shutdownPingSender.enabled", "false"),
-        ("datareporting.healthreport.uploadEnabled", "false"),
-        ("datareporting.policy.dataSubmissionEnabled", "false"),
-        ("app.normandy.enabled", "false"),
-        ("app.update.auto", "false"),
-        ("browser.shell.checkDefaultBrowser", "false"),
-        ("browser.startup.homepage_override.mstone", "\"ignore\""),
-        ("browser.aboutwelcome.enabled", "false"),
-        ("geo.enabled", "false"),
-        ("privacy.resistFingerprinting", "true"),
-        ("privacy.spoof_english", "2"),
+fn firefox_prefs(port: u16, persona: &Persona) -> String {
+    let (width, height) = persona.window;
+    let prefs: [(&str, String); 44] = [
+        ("network.proxy.type", "1".into()),
+        ("network.proxy.socks", "\"127.0.0.1\"".into()),
+        ("network.proxy.socks_port", port.to_string()),
+        ("network.proxy.socks_version", "5".into()),
+        ("network.proxy.socks_remote_dns", "true".into()),
+        ("network.proxy.socks5_remote_dns", "true".into()),
+        ("network.proxy.no_proxies_on", "\"\"".into()),
+        ("network.proxy.allow_hijacking_localhost", "true".into()),
+        ("network.proxy.failover_direct", "false".into()),
+        ("network.proxy.allow_bypass", "false".into()),
+        ("network.dns.disabled", "true".into()),
+        ("network.trr.mode", "5".into()),
+        ("network.dns.disablePrefetch", "true".into()),
+        ("network.prefetch-next", "false".into()),
+        ("network.predictor.enabled", "false".into()),
+        ("network.http.speculative-parallel-limit", "0".into()),
+        ("network.http.http3.enable", "false".into()),
+        ("media.peerconnection.ice.proxy_only", "true".into()),
+        ("media.peerconnection.ice.default_address_only", "true".into()),
+        ("media.peerconnection.ice.no_host", "true".into()),
+        ("network.captive-portal-service.enabled", "false".into()),
+        ("network.connectivity-service.enabled", "false".into()),
+        ("browser.safebrowsing.malware.enabled", "false".into()),
+        ("browser.safebrowsing.phishing.enabled", "false".into()),
+        ("browser.safebrowsing.downloads.remote.enabled", "false".into()),
+        ("toolkit.telemetry.enabled", "false".into()),
+        ("toolkit.telemetry.shutdownPingSender.enabled", "false".into()),
+        ("datareporting.healthreport.uploadEnabled", "false".into()),
+        ("datareporting.policy.dataSubmissionEnabled", "false".into()),
+        ("app.normandy.enabled", "false".into()),
+        ("app.update.auto", "false".into()),
+        ("browser.shell.checkDefaultBrowser", "false".into()),
+        ("browser.startup.homepage_override.mstone", "\"ignore\"".into()),
+        ("browser.aboutwelcome.enabled", "false".into()),
+        ("geo.enabled", "false".into()),
+        ("privacy.fingerprintingProtection", "true".into()),
+        (
+            "privacy.fingerprintingProtection.overrides",
+            "\"+WindowOuterSize,+ScreenRect,+ScreenAvailRect,+RoundWindowSize,+WebGLRandomization,+WebGLRendererConstant,+WebGLVendorSanitize,-NavigatorHWConcurrencyTiered\"".into(),
+        ),
+        ("privacy.fingerprintingProtection.remoteOverrides.enabled", "false".into()),
+        ("privacy.window.maxInnerWidth", width.to_string()),
+        ("privacy.window.maxInnerHeight", height.to_string()),
+        ("dom.maxHardwareConcurrency", persona.cores.to_string()),
+        ("intl.accept_languages", "\"en-US, en\"".into()),
+        ("javascript.use_us_english_locale", "true".into()),
+        ("intl.regional_prefs.use_os_locales", "false".into()),
     ];
     prefs.iter().map(|(name, value)| format!("user_pref(\"{name}\", {value});\n")).collect()
 }
 
+fn seed_brave_preferences(profile: &Path) -> Result<(), String> {
+    let dir = profile.join("Default");
+    let path = dir.join("Preferences");
+    let fail = |e: std::io::Error| format!("could not write the browser's settings to {}: {e}; nothing was opened", path.display());
+    let mut prefs = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text).ok().filter(serde_json::Value::is_object).ok_or_else(|| format!("{} is not a JSON object; nothing was opened", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(fail(e)),
+    };
+    if !prefs["webrtc"].is_object() {
+        prefs["webrtc"] = serde_json::json!({});
+    }
+    prefs["webrtc"]["ip_handling_policy"] = serde_json::json!(BRAVE_WEBRTC_POLICY);
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(fail)?;
+    std::fs::write(&path, prefs.to_string()).map_err(fail)
+}
+
+enum Setup {
+    UserJs(String),
+    BravePreferences,
+}
+
 struct Launch {
     args: Vec<String>,
-    env: [(&'static str, &'static str); 1],
-    prefs: Option<String>,
+    env: Vec<(&'static str, String)>,
+    setup: Setup,
 }
 
 impl Launch {
-    fn new(kind: Kind, profile: &Path, port: u16) -> Launch {
-        let mut args = profile_args(kind.family, profile);
-        match kind.family {
-            Family::Chromium => {
-                args.extend(chromium_args(port));
-                args.extend(kind.extra.iter().map(|s| (*s).to_owned()));
-                Launch { args, env: [("TZ", "UTC")], prefs: None }
+    fn new(kind: Kind, profile: &Path, port: u16, persona: &Persona) -> Launch {
+        let mut args = profile_args(kind, profile);
+        let time_zone = ("TZ", persona.time_zone.clone());
+        match kind {
+            Kind::Firefox => Launch { args, env: vec![time_zone, ("MOZ_CRASHREPORTER_DISABLE", "1".into())], setup: Setup::UserJs(firefox_prefs(port, persona)) },
+            Kind::Brave => {
+                args.extend(brave_args(port, persona));
+                Launch { args, env: vec![time_zone], setup: Setup::BravePreferences }
             }
-            Family::Firefox => Launch { args, env: [("MOZ_CRASHREPORTER_DISABLE", "1")], prefs: Some(firefox_prefs(port)) },
         }
     }
 
     fn stamp(&self) -> String {
-        let env = self.env.iter().map(|(name, value)| format!("{name}={value}"));
-        self.args.iter().cloned().chain(env).chain(self.prefs.clone()).collect::<Vec<_>>().join("\n")
+        let setup = match &self.setup {
+            Setup::UserJs(prefs) => prefs.clone(),
+            Setup::BravePreferences => format!("webrtc.ip_handling_policy={BRAVE_WEBRTC_POLICY}"),
+        };
+        self.args.iter().cloned().chain(self.env.iter().map(|(name, value)| format!("{name}={value}"))).chain([setup]).collect::<Vec<_>>().join("\n")
+    }
+
+    fn prepare(&self, profile: &Path) -> Result<(), String> {
+        match &self.setup {
+            Setup::UserJs(prefs) => std::fs::write(profile.join("user.js"), prefs).map_err(|e| format!("could not write the browser's settings: {e}; nothing was opened")),
+            Setup::BravePreferences => seed_brave_preferences(profile),
+        }
     }
 }
 
@@ -339,7 +429,7 @@ impl Browser {
 
     fn profile(&self, kind: Kind) -> Result<PathBuf, String> {
         let host: String = Sha256::digest(self.config.host.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
-        let dir = claudette_dir().join("browser").join(format!("{}-{host}", kind.id));
+        let dir = claudette_dir().join("browser").join(format!("{}-{host}", kind.id()));
         let fail = |e: std::io::Error| format!("could not make {}: {e}", dir.display());
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(fail)?;
         dir.canonicalize().map_err(fail)
@@ -393,35 +483,34 @@ impl Browser {
     }
 
     pub async fn open(&self, request: &str) -> Result<(), String> {
-        let url = gate_url(request)?;
+        let open = parse_open(request)?;
         let host = &self.config.host;
-        let (program, kind) = find().ok_or("no supported browser on this machine: install Google Chrome, Chromium, Brave, Microsoft Edge or Firefox; nothing was opened")?;
+        let (program, kind) = find().ok_or("neither Firefox nor Brave is installed on this machine, and claudette opens links only in one of them: install one, then open the link again; nothing was opened")?;
         let version = version(&program).await?;
-        let min = kind.family.min_version();
+        let min = kind.min_version();
         if version < min {
-            return Err(format!("{} {version} can't be kept to {host}'s connection; claudette needs version {min} or later, so nothing was opened", kind.name));
+            return Err(format!("{} {version} is older than claudette supports ({min} or later), so nothing was opened", kind.name()));
         }
         let profile = self.profile(kind)?;
         let _lock = lock(&profile).await?;
         join(&profile, host)?;
-        let running = running(&profile_args(kind.family, &profile))?;
+        let running = running(&profile_args(kind, &profile))?;
         let port = self.proxy(&profile, running).await?;
-        let launch = Launch::new(kind, &profile, port);
+        let persona = Persona::new(seed(&profile)?.as_bytes(), open.time_zone);
+        let launch = Launch::new(kind, &profile, port, &persona);
         let stamp = launch.stamp();
         if running {
             if std::fs::read_to_string(profile.join(LAUNCH)).ok().as_deref() != Some(stamp.as_str()) {
-                return Err(format!("the {} window claudette opened for {host} still runs with another version's settings: quit it, then open the link again; nothing was opened", kind.name));
+                return Err(format!("the {} window claudette opened for {host} still runs with other settings, from another version of claudette or an earlier time zone of {host}: quit it, then open the link again; nothing was opened", kind.name()));
             }
         } else {
-            if let Some(prefs) = &launch.prefs {
-                std::fs::write(profile.join("user.js"), prefs).map_err(|e| format!("could not write the browser's settings: {e}"))?;
-            }
-            std::fs::write(profile.join(LAUNCH), &stamp).map_err(|e| format!("could not save the browser's settings: {e}"))?;
+            launch.prepare(&profile)?;
+            std::fs::write(profile.join(LAUNCH), &stamp).map_err(|e| format!("could not save the browser's settings: {e}; nothing was opened"))?;
         }
         let mut child = std::process::Command::new(&program)
             .args(&launch.args)
-            .args(["--new-window", url.as_str()])
-            .envs(launch.env)
+            .args(["--new-window", open.url.as_str()])
+            .envs(launch.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

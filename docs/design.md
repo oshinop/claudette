@@ -383,46 +383,50 @@ failing. The clipboard here is `pbcopy` and `pbpaste` on macOS, and on Linux wl-
 Wayland session or xclip or xsel in an X11 one.
 
 Only `http` and `https` links open, and the link itself never reaches this machine. The helper
-listens on a free port of the remote machine's `127.0.0.1` and sends that port with a random
-32-digit token; this machine opens `http://127.0.0.1:<port>/<token>` in the browser. Only a browser
-whose traffic, loopback included, goes through the remote machine reaches that address, and the
-helper answers it with a redirect to the link. If no browser asks within 30 seconds, the helper
-fails, so a browser that ignores the proxy, whether by its version, a policy or another instance
-taking the window, never gets the link.
+listens on a free port of the remote machine's `127.0.0.1` and sends that port, a random 32-digit
+token and the remote machine's time zone (from `TZ`, `/etc/localtime` or `/etc/timezone`, else
+UTC); this machine opens `http://127.0.0.1:<port>/<token>` in the browser. Only a browser whose
+traffic, loopback included, goes through the remote machine reaches that address, and the helper
+answers it with a redirect to the link. If no browser asks within 30 seconds, the helper fails, so a
+browser that ignores the proxy, whether by its version, a policy or another instance taking the
+window, never gets the link.
 
-Here the link opens in the first of Chrome, Chromium, Brave, Edge and Firefox that is installed,
-as long as `--version` reports 105 or later for the Chromium-based ones and 107 or later for
-Firefox; older versions ignore settings that keep their traffic on the proxy (Chrome's WebRTC
-setting came in 105, and Firefox before 107 sends some of its own requests around a proxy that
-fails), so they open nothing. Each browser has a profile for each remote host in
-`~/.config/claudette/browser/<browser>-<host>`, where `<host>` is the first 12 hex digits of the
-host's SHA-256. The browser goes online through `ssh -N -D` to that host: a SOCKS5 proxy on a
-loopback port kept in the profile (`claudette-proxy-port`), since a running browser keeps the proxy
-it started with. While the browser isn't running, each start takes a new port that no other host's
-profile holds. A running proxy is reused only while the process in `claudette-proxy-pid` is still
-the ssh forwarding that port to that host. The ssh connection is its own rather than the shared
-one, and never prompts.
+Here the link opens in Firefox 148 or later, or else Brave 105 or later, as `--version` reports
+them; Chrome, Edge and Chromium aren't used, since they can't give the window a fingerprint of its
+own, and Firefox before 148 lacks some of the protections below. Each browser has a profile for
+each remote host in `~/.config/claudette/browser/<browser>-<host>`, where `<host>` is the first 12
+hex digits of the host's SHA-256. The browser goes online through `ssh -N -D` to that host: a
+SOCKS5 proxy on a loopback port kept in the profile (`claudette-proxy-port`), since a running
+browser keeps the proxy it started with. While the browser isn't running, each start takes a new
+port that no other host's profile holds. A running proxy is reused only while the process in
+`claudette-proxy-pid` is still the ssh forwarding that port to that host. The ssh connection is its
+own rather than the shared one, and never prompts.
 
-Chromium sends loopback addresses through the proxy too (`--proxy-bypass-list=<-loopback>`),
-leaves names to the remote machine, and fails any name it would resolve itself
-(`--host-resolver-rules=MAP * ~NOTFOUND`); WebRTC sends no UDP outside the proxy, and QUIC,
-background networking, component updates, sync, crash reports, Cast discovery and, in Brave, its
-updater and Tor client are off. Firefox gets the same through `user.js`: remote DNS through the
-proxy, its own DNS lookups and DNS over HTTPS off, the proxy for `localhost`, no direct failover
-and no proxy bypass for its own requests (`network.proxy.allow_bypass`), WebRTC, prefetching,
-HTTP/3 and telemetry off, and its crash reporter disabled.
+Firefox gets its settings through `user.js`: remote DNS through the proxy, its own DNS lookups and
+DNS over HTTPS off, the proxy for `localhost`, no direct failover and no proxy bypass for its own
+requests (`network.proxy.allow_bypass`), WebRTC limited to the proxy with no host addresses,
+prefetching, HTTP/3 and telemetry off, and its crash reporter disabled. Brave sends loopback
+addresses through the proxy too (`--proxy-bypass-list=<-loopback>`), leaves names to the remote
+machine and fails any name it would resolve itself (`--host-resolver-rules=MAP * ~NOTFOUND`), with
+QUIC, background networking, component updates, sync, crash reports, Cast discovery, its updater
+and its Tor client off. Its WebRTC is limited to the proxy through `webrtc.ip_handling_policy` in
+the profile's `Default/Preferences`, written before each start: Brave ignores Chromium's
+`--webrtc-ip-handling-policy`, and with that switch present it ignores the preference too.
 
-So that sites can't match the window to the browser used every day on this machine, it reports UTC
-as its time zone and `en-US` as its language. Firefox runs with `privacy.resistFingerprinting`;
-Chromium draws canvases in software, which changes their fingerprint, but its WebGL, audio and font
-fingerprints stay this machine's.
+Each profile gets a random seed (`claudette-seed`) on first use, and takes from it a window size,
+which is also the screen size sites see, and, in Firefox, a processor count no higher than this
+machine's. Both browsers report the remote machine's time zone and `en-US`. Firefox runs its
+fingerprinting protection (`privacy.fingerprintingProtection`) with canvas and WebGL readouts
+randomized, the GPU's name replaced by a constant and the screen reported as the window; Brave
+randomizes canvas, WebGL, audio, processor count and screen size itself, but shows the GPU's name.
+WebRTC stays available in both, so its absence doesn't mark the window.
 
 The settings a browser was started with are kept in its profile (`claudette-launch`). When the
-browser is already running with other settings, such as an earlier claudette's, the link isn't
-opened and the error asks to quit that browser first. Every session that opens a link records
-itself in the profile (`claudette-sessions/<pid>`) under a lock, held while the proxy starts and
-the browser launches; the proxy stops when the last of them ends, and the next link starts it
-again.
+browser is already running with other settings, such as an earlier claudette's or an earlier time
+zone of the remote machine, the link isn't opened and the error asks to quit that browser first.
+Every session that opens a link records itself in the profile (`claudette-sessions/<pid>`) under a
+lock, held while the proxy starts and the browser launches; the proxy stops when the last of them
+ends, and the next link starts it again.
 
 ## SDK relay
 

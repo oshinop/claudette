@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,7 +30,7 @@ pub async fn open(socket: &str, url: &str) -> i32 {
             return 1;
         }
     };
-    let status = super::desktop(socket, &format!("open {port} {token}"), false).await;
+    let status = super::desktop(socket, &format!("open {port} {token} {}", time_zone()), false).await;
     if status != 0 {
         return status;
     }
@@ -49,9 +48,14 @@ pub async fn open(socket: &str, url: &str) -> i32 {
 }
 
 fn token() -> std::io::Result<String> {
-    let mut bytes = [0u8; crate::browser::GATE_TOKEN_BYTES];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(crate::browser::hex(&crate::browser::random::<{ crate::browser::GATE_TOKEN_BYTES }>()?))
+}
+
+fn time_zone() -> String {
+    let set = std::env::var("TZ").ok().map(|tz| tz.trim_start_matches(':').to_owned());
+    let linked = std::fs::read_link("/etc/localtime").ok().and_then(|p| Some(p.to_str()?.split_once("zoneinfo/")?.1.to_owned()));
+    let written = std::fs::read_to_string("/etc/timezone").ok().map(|s| s.trim().to_owned());
+    [set, linked, written].into_iter().flatten().find(|tz| crate::browser::valid_time_zone(tz)).unwrap_or_else(|| "UTC".into())
 }
 
 async fn hand_over(listener: TcpListener, token: &str, url: &str) -> std::io::Result<()> {

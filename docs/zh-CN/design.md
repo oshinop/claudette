@@ -165,15 +165,15 @@ claude mcp remove docs
 
 本次运行的准备脚本会在 `$T.bin` 中写入三个脚本，并把该目录放在 `PATH` 最前面：导出为 `BROWSER` 的 `claudette-browser` 运行 `__helper open <socket> <url>`；`pbcopy` 和 `pbpaste` 分别运行 `__helper copy <socket>` 和 `__helper paste <socket>`。该 socket 转发到本机。请求只有一行：`open <端口> <令牌>`、`copy`（其后是复制的文本）或 `paste`；回复为 `ok`（`paste` 时其后是剪贴板内容）或错误，辅助程序会输出错误并以失败状态退出。本机的剪贴板在 macOS 上是 `pbcopy` 和 `pbpaste`，在 Linux 上，Wayland 会话使用 wl-clipboard，X11 会话使用 xclip 或 xsel。
 
-只会打开 `http` 和 `https` 链接，而且链接本身从不到达本机。辅助程序在远程机器的 `127.0.0.1` 上监听一个空闲端口，并把该端口和一个 32 位的随机令牌发给本机；本机在浏览器中打开 `http://127.0.0.1:<端口>/<令牌>`。只有流量（包括回环地址）经由远程机器的浏览器才能访问这个地址，辅助程序用重定向到该链接作为回应。如果 30 秒内没有浏览器来访问，辅助程序就以失败退出，因此无论是因为版本、策略，还是窗口被另一个实例接管，不走代理的浏览器都拿不到链接。
+只会打开 `http` 和 `https` 链接，而且链接本身从不到达本机。辅助程序在远程机器的 `127.0.0.1` 上监听一个空闲端口，并把该端口、一个 32 位的随机令牌和远程机器的时区（取自 `TZ`、`/etc/localtime` 或 `/etc/timezone`，否则为 UTC）发给本机；本机在浏览器中打开 `http://127.0.0.1:<端口>/<令牌>`。只有流量（包括回环地址）经由远程机器的浏览器才能访问这个地址，辅助程序用重定向到该链接作为回应。如果 30 秒内没有浏览器来访问，辅助程序就以失败退出，因此无论是因为版本、策略，还是窗口被另一个实例接管，不走代理的浏览器都拿不到链接。
 
-在本机，链接在 Chrome、Chromium、Brave、Edge 和 Firefox 中第一个已安装的浏览器里打开，前提是 `--version` 报告的版本对基于 Chromium 的浏览器为 105 或更高，对 Firefox 为 107 或更高；更早的版本会忽略让流量留在代理上的设置（Chrome 的 WebRTC 设置从 105 才有，107 之前的 Firefox 会在代理失败时绕过代理发送它自己的一些请求），所以什么也不打开。每个浏览器为每台远程主机使用 `~/.config/claudette/browser/<浏览器>-<主机>` 中的单独配置文件，其中 `<主机>` 是主机名 SHA-256 的前 12 位十六进制数字。浏览器经由到该主机的 `ssh -N -D` 联网：这是一个 SOCKS5 代理，监听保存在配置文件中（`claudette-proxy-port`）的回环端口，因为运行中的浏览器会一直使用启动时的代理。浏览器没有运行时，每次启动都选用一个新端口，且不会是其他主机的配置文件占用的端口。只有当 `claudette-proxy-pid` 中的进程仍是把该端口转发到该主机的 ssh 时，才会复用正在运行的代理。该 ssh 连接是独立的，不使用共享连接，也从不提示输入。
+在本机，链接在 Firefox 148 或更高版本中打开，否则在 Brave 105 或更高版本中打开，版本以 `--version` 的报告为准；不使用 Chrome、Edge 和 Chromium，因为无法让它们的窗口拥有自己的指纹，而 148 之前的 Firefox 缺少下文的部分保护。每个浏览器为每台远程主机使用 `~/.config/claudette/browser/<浏览器>-<主机>` 中的单独配置文件，其中 `<主机>` 是主机名 SHA-256 的前 12 位十六进制数字。浏览器经由到该主机的 `ssh -N -D` 联网：这是一个 SOCKS5 代理，监听保存在配置文件中（`claudette-proxy-port`）的回环端口，因为运行中的浏览器会一直使用启动时的代理。浏览器没有运行时，每次启动都选用一个新端口，且不会是其他主机的配置文件占用的端口。只有当 `claudette-proxy-pid` 中的进程仍是把该端口转发到该主机的 ssh 时，才会复用正在运行的代理。该 ssh 连接是独立的，不使用共享连接，也从不提示输入。
 
-Chromium 对回环地址也使用代理（`--proxy-bypass-list=<-loopback>`），域名交给远程机器解析，它自己要解析的任何域名都会失败（`--host-resolver-rules=MAP * ~NOTFOUND`）；WebRTC 不在代理之外发送 UDP，QUIC、后台联网、组件更新、同步、崩溃报告、Cast 设备发现，以及 Brave 的更新程序和 Tor 客户端均关闭。Firefox 通过 `user.js` 获得同样的设置：DNS 经代理远程解析，关闭它自己的 DNS 查询和 DNS over HTTPS，`localhost` 也走代理，不直接回退，它自己的请求也不绕过代理（`network.proxy.allow_bypass`），关闭 WebRTC、预取、HTTP/3 和遥测，并禁用崩溃报告程序。
+Firefox 通过 `user.js` 获得设置：DNS 经代理远程解析，关闭它自己的 DNS 查询和 DNS over HTTPS，`localhost` 也走代理，不直接回退，它自己的请求也不绕过代理（`network.proxy.allow_bypass`），WebRTC 只能经由代理且不暴露本机地址，关闭预取、HTTP/3 和遥测，并禁用崩溃报告程序。Brave 对回环地址也使用代理（`--proxy-bypass-list=<-loopback>`），域名交给远程机器解析，它自己要解析的任何域名都会失败（`--host-resolver-rules=MAP * ~NOTFOUND`），并关闭 QUIC、后台联网、组件更新、同步、崩溃报告、Cast 设备发现、它的更新程序和 Tor 客户端。它的 WebRTC 通过配置文件 `Default/Preferences` 中的 `webrtc.ip_handling_policy` 限制为只经由代理，该设置在每次启动前写入：Brave 会忽略 Chromium 的 `--webrtc-ip-handling-policy`，而且只要带上这个开关，它连这项设置也会忽略。
 
-为了让网站无法把该窗口与本机日常使用的浏览器对应起来，它报告的时区是 UTC，语言是 `en-US`。Firefox 启用 `privacy.resistFingerprinting`；Chromium 用软件绘制 canvas，从而改变其指纹，但它的 WebGL、音频和字体指纹仍是本机的。
+每个配置文件首次使用时会获得一个随机种子（`claudette-seed`），并据此确定窗口大小（也就是网站看到的屏幕大小），在 Firefox 中还确定一个不超过本机的处理器数量。两个浏览器都报告远程机器的时区和 `en-US`。Firefox 启用指纹保护（`privacy.fingerprintingProtection`），canvas 和 WebGL 的读出被随机化，GPU 名称换成常量，屏幕报告为窗口大小；Brave 自己随机化 canvas、WebGL、音频、处理器数量和屏幕大小，但会显示 GPU 名称。两者都保留 WebRTC，因此不会因为缺少它而让窗口显得特殊。
 
-浏览器启动时使用的设置保存在其配置文件中（`claudette-launch`）。如果浏览器已经以其他设置（例如旧版 claudette 的设置）运行，链接不会打开，错误信息会要求先退出该浏览器。每个打开过链接的会话都会在配置文件中记录自己（`claudette-sessions/<pid>`），并受一把锁保护，代理启动和浏览器启动期间都持有该锁；代理在其中最后一个会话结束时停止，下一个链接会再次启动它。
+浏览器启动时使用的设置保存在其配置文件中（`claudette-launch`）。如果浏览器已经以其他设置（例如旧版 claudette 的设置，或远程机器之前的时区）运行，链接不会打开，错误信息会要求先退出该浏览器。每个打开过链接的会话都会在配置文件中记录自己（`claudette-sessions/<pid>`），并受一把锁保护，代理启动和浏览器启动期间都持有该锁；代理在其中最后一个会话结束时停止，下一个链接会再次启动它。
 
 <a id="sdk-relay"></a>
 ## SDK 中继

@@ -413,10 +413,13 @@ describe("plugins: Claude Code's own installer, working on the local machine's s
   });
 });
 
-const fakeChromium = (version: string, route: "proxy" | "direct") => `#!/usr/bin/env bun
+const fakeBrave = (version: string, route: "proxy" | "direct") => `#!/usr/bin/env bun
 const net = require("node:net");
+const fs = require("node:fs");
 const args = process.argv.slice(2);
-if (args[0] === "--version") { console.log("Chromium ${version}"); process.exit(0); }
+if (args[0] === "--version") { console.log("Brave Browser ${version}"); process.exit(0); }
+const profile = args.find((a) => a.startsWith("--user-data-dir=")).slice("--user-data-dir=".length);
+const prefs = JSON.parse(fs.readFileSync(profile + "/Default/Preferences", "utf8"));
 const port = Number(args.find((a) => a.startsWith("--proxy-server=")).split(":").pop());
 const get = (url) => {
   const { promise, resolve } = Promise.withResolvers();
@@ -438,20 +441,20 @@ const get = (url) => {
 let response = await get(new URL(args.at(-1)));
 const location = /^Location: (.*)$/im.exec(response);
 if (location) response = await get(new URL(location[1].trim()));
-require("node:fs").writeFileSync(process.env.FAKE_BROWSER_OUT, JSON.stringify({ args, page: response.split("\\r\\n\\r\\n").slice(1).join("") || response }));
+fs.writeFileSync(process.env.FAKE_BROWSER_OUT, JSON.stringify({ args, tz: process.env.TZ, webrtc: prefs.webrtc?.ip_handling_policy, page: response.split("\\r\\n\\r\\n").slice(1).join("") || response }));
 `;
-const FAKE_CHROMIUM = fakeChromium("158.0.7000.0", "proxy");
+const FAKE_BRAVE = fakeBrave("158.1.100.59", "proxy");
 
 describe("links the remote claude opens", () => {
   test("$BROWSER opens them on the local machine, in a browser whose traffic leaves from the remote machine; other kinds of link are refused", async () => {
     const server = installRemoteServer();
     onRemote(`nohup node -e 'require("http").createServer((q, r) => r.end("served-by:" + require("os").hostname() + q.url)).listen(8765, "127.0.0.1")' >/dev/null 2>&1 &`);
     const bin = mkdtempSync(join(tmpdir(), "bin-"));
-    writeFileSync(join(bin, "chromium"), FAKE_CHROMIUM, { mode: 0o755 });
+    writeFileSync(join(bin, "brave-browser"), FAKE_BRAVE, { mode: 0o755 });
     const out = join(bin, "opened.json");
     const dir = project();
     try {
-      expect(mcp(dir, "add", "--remote", "--", "opener", "node", server).code).toBe(0);
+      expect(mcp(dir, "add", "--remote", "-e", "TZ=Pacific/Auckland", "--", "opener", "node", server).code).toBe(0);
       const id = await scenario([
         { tool: "open", input: { url: "http://localhost:8765/callback?code=1" } },
         { tool: "open", input: { url: "file:///etc/passwd" } },
@@ -464,9 +467,11 @@ describe("links the remote claude opens", () => {
       });
       expect(run.result.result, run.out).toMatch(/^status:1\b/);
       expect(await until(() => existsSync(out), 15_000)).toBe(true);
-      const opened = JSON.parse(readFileSync(out, "utf8")) as { args: string[]; page: string };
+      const opened = JSON.parse(readFileSync(out, "utf8")) as { args: string[]; tz: string; webrtc: string; page: string };
       expect(opened.page).toBe(`served-by:${onRemote("hostname")}/callback?code=1`);
-      expect(opened.args).toContain("--webrtc-ip-handling-policy=disable_non_proxied_udp");
+      expect(opened.webrtc).toBe("disable_non_proxied_udp");
+      expect(opened.args.some((a) => a.startsWith("--webrtc-ip-handling-policy"))).toBe(false);
+      expect(opened.tz).toBe("Pacific/Auckland");
       expect(opened.args.at(-1)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{32}$/);
       expect(await until(() => Bun.spawnSync(["pgrep", "-f", "--", "-D 127.0.0.1:"]).stdout.toString().trim() === "", 5_000)).toBe(true);
       expect(await leftoverSockets()).toBe("0");
@@ -483,7 +488,7 @@ describe("links the remote claude opens", () => {
     const out = join(bin, "opened.json");
     const dir = project();
     const open = async (script: string) => {
-      writeFileSync(join(bin, "chromium"), script, { mode: 0o755 });
+      writeFileSync(join(bin, "brave-browser"), script, { mode: 0o755 });
       rmSync(out, { force: true });
       const id = await scenario([{ tool: "open", input: { url: "https://example.com/authorize?state=secret" } }, { text: "{{last_tool_result}}" }]);
       return claude(dir, ["-p", `[[scenario:${id}]] open`, "--output-format", "json", "--allowedTools", "mcp__opener__open"], {
@@ -494,14 +499,14 @@ describe("links the remote claude opens", () => {
     };
     try {
       expect(mcp(dir, "add", "--remote", "--", "opener", "node", server).code).toBe(0);
-      const direct = await open(fakeChromium("158.0.7000.0", "direct"));
+      const direct = await open(fakeBrave("158.1.100.59", "direct"));
       expect(direct.result.result, direct.out).toMatch(/^status:1 .*did not come through this machine/);
       const tried = JSON.parse(readFileSync(out, "utf8")) as { args: string[]; page: string };
       expect(tried.page).toMatch(/^error:/);
       expect(tried.page).not.toContain("example.com");
 
-      const old = await open(fakeChromium("104.0.5112.0", "proxy"));
-      expect(old.result.result, old.out).toMatch(/^status:1 .*Chromium 104 .*version 105 or later/);
+      const old = await open(fakeBrave("104.1.42.88", "proxy"));
+      expect(old.result.result, old.out).toMatch(/^status:1 .*Brave 104 is older than claudette supports \(105 or later\)/);
       expect(existsSync(out)).toBe(false);
     } finally {
       mcp(dir, "remove", "opener");
@@ -513,7 +518,7 @@ describe("links the remote claude opens", () => {
     const server = installRemoteServer();
     onRemote(`nohup node -e 'require("http").createServer((q, r) => r.end("served-by:" + require("os").hostname() + q.url)).listen(8765, "127.0.0.1")' >/dev/null 2>&1 &`);
     const bin = mkdtempSync(join(tmpdir(), "bin-"));
-    writeFileSync(join(bin, "chromium"), FAKE_CHROMIUM, { mode: 0o755 });
+    writeFileSync(join(bin, "brave-browser"), FAKE_BRAVE, { mode: 0o755 });
     const dir = project();
     const proxy = () => Bun.spawnSync(["pgrep", "-f", "--", "-D 127.0.0.1:"]).stdout.toString().trim();
     const session = async (name: string, steps: Step[]) => {

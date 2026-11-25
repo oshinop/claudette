@@ -74,10 +74,16 @@ When something on the remote machine opens a link with `$BROWSER`, such as Claud
 to a server you added with `--remote` through `/mcp`, the link opens on the local machine, in a
 separate browser window that goes online through the remote machine: `localhost` in that window is
 the remote machine's, names resolve there, and sites see the remote machine's address. claudette
-uses Google Chrome, Chromium, Brave, Microsoft Edge or Firefox, with its own profile for each remote
-machine in `~/.config/claudette/browser`, so the window has none of your everyday browser's cookies
-or extensions. Only `http` and `https` links open. The window reaches the remote machine while any
+uses Google Chrome, Chromium, Brave or Microsoft Edge 105 or later, or Firefox 107 or later, with
+its own profile for each remote machine in `~/.config/claudette/browser`, so the window has none of
+your everyday browser's cookies or extensions. It reports UTC as its time zone and `en-US` as its
+language. Only `http` and `https` links open. The window reaches the remote machine while any
 session that opened a link to that machine is running.
+
+The window is given the link only after it has come through the remote machine to ask for it.
+If the browser is too old, isn't going through the remote machine, or is still running with an
+earlier claudette's settings, nothing is opened, and the program that opened the link gets an
+error saying why.
 
 Programs on the remote machine see no ssh session, and `pbcopy` and `pbpaste` there use the local
 machine's clipboard (on Linux, through wl-clipboard, xclip or xsel).

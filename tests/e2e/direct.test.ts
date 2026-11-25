@@ -413,22 +413,34 @@ describe("plugins: Claude Code's own installer, working on the local machine's s
   });
 });
 
-const FAKE_CHROMIUM = `#!/usr/bin/env bun
+const fakeChromium = (version: string, route: "proxy" | "direct") => `#!/usr/bin/env bun
 const net = require("node:net");
 const args = process.argv.slice(2);
+if (args[0] === "--version") { console.log("Chromium ${version}"); process.exit(0); }
 const port = Number(args.find((a) => a.startsWith("--proxy-server=")).split(":").pop());
-const url = new URL(args.at(-1));
-const sock = net.connect(port, "127.0.0.1");
-let stage = 0, buf = Buffer.alloc(0);
-sock.on("connect", () => sock.write(Buffer.from([5, 1, 0])));
-sock.on("data", (d) => {
-  buf = Buffer.concat([buf, d]);
-  if (stage === 0 && buf.length >= 2) { stage = 1; buf = buf.subarray(2); const h = Buffer.from(url.hostname); const p = Number(url.port || 80);
-    sock.write(Buffer.concat([Buffer.from([5, 1, 0, 3, h.length]), h, Buffer.from([p >> 8, p & 255])])); }
-  if (stage === 1 && buf.length >= 10) { stage = 2; buf = buf.subarray(10); sock.write("GET " + url.pathname + " HTTP/1.0\\r\\nHost: " + url.host + "\\r\\n\\r\\n"); }
-});
-sock.on("end", () => require("node:fs").writeFileSync(process.env.FAKE_BROWSER_OUT, JSON.stringify({ args, page: buf.toString().split("\\r\\n\\r\\n").slice(1).join("") })));
+const get = (url) => {
+  const { promise, resolve } = Promise.withResolvers();
+  const direct = ${route === "direct"};
+  const sock = direct ? net.connect(Number(url.port), url.hostname) : net.connect(port, "127.0.0.1");
+  const request = "GET " + url.pathname + url.search + " HTTP/1.0\\r\\nHost: " + url.host + "\\r\\n\\r\\n";
+  let stage = direct ? 2 : 0, buf = Buffer.alloc(0);
+  sock.on("connect", () => sock.write(direct ? request : Buffer.from([5, 1, 0])));
+  sock.on("data", (d) => {
+    buf = Buffer.concat([buf, d]);
+    if (stage === 0 && buf.length >= 2) { stage = 1; buf = buf.subarray(2); const h = Buffer.from(url.hostname); const p = Number(url.port || 80);
+      sock.write(Buffer.concat([Buffer.from([5, 1, 0, 3, h.length]), h, Buffer.from([p >> 8, p & 255])])); }
+    if (stage === 1 && buf.length >= 10) { stage = 2; buf = buf.subarray(10); sock.write(request); }
+  });
+  sock.on("error", (e) => resolve("error:" + e.code));
+  sock.on("end", () => resolve(buf.toString()));
+  return promise;
+};
+let response = await get(new URL(args.at(-1)));
+const location = /^Location: (.*)$/im.exec(response);
+if (location) response = await get(new URL(location[1].trim()));
+require("node:fs").writeFileSync(process.env.FAKE_BROWSER_OUT, JSON.stringify({ args, page: response.split("\\r\\n\\r\\n").slice(1).join("") || response }));
 `;
+const FAKE_CHROMIUM = fakeChromium("158.0.7000.0", "proxy");
 
 describe("links the remote claude opens", () => {
   test("$BROWSER opens them on the local machine, in a browser whose traffic leaves from the remote machine; other kinds of link are refused", async () => {
@@ -453,13 +465,46 @@ describe("links the remote claude opens", () => {
       expect(run.result.result, run.out).toMatch(/^status:1\b/);
       expect(await until(() => existsSync(out), 15_000)).toBe(true);
       const opened = JSON.parse(readFileSync(out, "utf8")) as { args: string[]; page: string };
-      expect(opened.page).toBe(`served-by:${onRemote("hostname")}/callback`);
+      expect(opened.page).toBe(`served-by:${onRemote("hostname")}/callback?code=1`);
       expect(opened.args).toContain("--webrtc-ip-handling-policy=disable_non_proxied_udp");
+      expect(opened.args.at(-1)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{32}$/);
       expect(await until(() => Bun.spawnSync(["pgrep", "-f", "--", "-D 127.0.0.1:"]).stdout.toString().trim() === "", 5_000)).toBe(true);
       expect(await leftoverSockets()).toBe("0");
     } finally {
       mcp(dir, "remove", "opener");
       onRemote("pkill -f 'listen(8765'");
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  test("a browser that skips the remote machine's connection gets no link, and one too old to be held to it is not started", async () => {
+    const server = installRemoteServer();
+    const bin = mkdtempSync(join(tmpdir(), "bin-"));
+    const out = join(bin, "opened.json");
+    const dir = project();
+    const open = async (script: string) => {
+      writeFileSync(join(bin, "chromium"), script, { mode: 0o755 });
+      rmSync(out, { force: true });
+      const id = await scenario([{ tool: "open", input: { url: "https://example.com/authorize?state=secret" } }, { text: "{{last_tool_result}}" }]);
+      return claude(dir, ["-p", `[[scenario:${id}]] open`, "--output-format", "json", "--allowedTools", "mcp__opener__open"], {
+        ENABLE_TOOL_SEARCH: "false",
+        PATH: `${bin}:${process.env.PATH}`,
+        FAKE_BROWSER_OUT: out,
+      });
+    };
+    try {
+      expect(mcp(dir, "add", "--remote", "--", "opener", "node", server).code).toBe(0);
+      const direct = await open(fakeChromium("158.0.7000.0", "direct"));
+      expect(direct.result.result, direct.out).toMatch(/^status:1 .*did not come through this machine/);
+      const tried = JSON.parse(readFileSync(out, "utf8")) as { args: string[]; page: string };
+      expect(tried.page).toMatch(/^error:/);
+      expect(tried.page).not.toContain("example.com");
+
+      const old = await open(fakeChromium("104.0.5112.0", "proxy"));
+      expect(old.result.result, old.out).toMatch(/^status:1 .*Chromium 104 .*version 105 or later/);
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      mcp(dir, "remove", "opener");
       rmSync(bin, { recursive: true, force: true });
     }
   });

@@ -19,11 +19,17 @@ use crate::config::{Config, claudette_dir};
 
 const PROXY_START: Duration = Duration::from_secs(15);
 const PROXY_CHECK: Duration = Duration::from_secs(1);
+const VERSION_CHECK: Duration = Duration::from_secs(10);
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+const PORT_TRIES: usize = 16;
 const PROXY_PORT: &str = "claudette-proxy-port";
 const PROXY_PID: &str = "claudette-proxy-pid";
 const SESSIONS: &str = "claudette-sessions";
+const LAUNCH: &str = "claudette-launch";
 
-static JOINED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+pub const GATE_TOKEN_BYTES: usize = 16;
+
+static JOINED: Mutex<Vec<(PathBuf, String)>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Family {
@@ -32,39 +38,55 @@ enum Family {
 }
 
 impl Family {
-    fn name(self) -> &'static str {
+    fn min_version(self) -> u32 {
         match self {
-            Family::Chromium => "chromium",
-            Family::Firefox => "firefox",
+            Family::Chromium => 105,
+            Family::Firefox => 107,
         }
     }
 }
 
-const MACOS: [(&str, Family); 5] = [
-    ("Google Chrome.app/Contents/MacOS/Google Chrome", Family::Chromium),
-    ("Chromium.app/Contents/MacOS/Chromium", Family::Chromium),
-    ("Brave Browser.app/Contents/MacOS/Brave Browser", Family::Chromium),
-    ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", Family::Chromium),
-    ("Firefox.app/Contents/MacOS/firefox", Family::Firefox),
+#[derive(Clone, Copy, Debug)]
+struct Kind {
+    id: &'static str,
+    name: &'static str,
+    family: Family,
+    extra: &'static [&'static str],
+}
+
+const CHROME: Kind = Kind { id: "chrome", name: "Google Chrome", family: Family::Chromium, extra: &[] };
+const CHROMIUM: Kind = Kind { id: "chromium", name: "Chromium", family: Family::Chromium, extra: &[] };
+const BRAVE: Kind = Kind { id: "brave", name: "Brave", family: Family::Chromium, extra: &["--disable-brave-update", "--disable-tor-client-updater-extension"] };
+const EDGE: Kind = Kind { id: "edge", name: "Microsoft Edge", family: Family::Chromium, extra: &[] };
+const FIREFOX: Kind = Kind { id: "firefox", name: "Firefox", family: Family::Firefox, extra: &[] };
+
+const MACOS: [(&str, Kind); 5] = [
+    ("Google Chrome.app/Contents/MacOS/Google Chrome", CHROME),
+    ("Chromium.app/Contents/MacOS/Chromium", CHROMIUM),
+    ("Brave Browser.app/Contents/MacOS/Brave Browser", BRAVE),
+    ("Microsoft Edge.app/Contents/MacOS/Microsoft Edge", EDGE),
+    ("Firefox.app/Contents/MacOS/firefox", FIREFOX),
 ];
 
-const LINUX: [(&str, Family); 7] = [
-    ("google-chrome", Family::Chromium),
-    ("google-chrome-stable", Family::Chromium),
-    ("chromium", Family::Chromium),
-    ("chromium-browser", Family::Chromium),
-    ("brave-browser", Family::Chromium),
-    ("microsoft-edge", Family::Chromium),
-    ("firefox", Family::Firefox),
+const LINUX: [(&str, Kind); 9] = [
+    ("google-chrome", CHROME),
+    ("google-chrome-stable", CHROME),
+    ("chromium", CHROMIUM),
+    ("chromium-browser", CHROMIUM),
+    ("brave-browser", BRAVE),
+    ("brave", BRAVE),
+    ("microsoft-edge", EDGE),
+    ("firefox", FIREFOX),
+    ("firefox-esr", FIREFOX),
 ];
 
-fn find() -> Option<(PathBuf, Family)> {
+fn find() -> Option<(PathBuf, Kind)> {
     if cfg!(target_os = "macos") {
         let roots = [PathBuf::from("/Applications"), crate::config::home().join("Applications")];
-        return MACOS.iter().flat_map(|(app, family)| roots.iter().map(move |root| (root.join(app), *family))).find(|(path, _)| path.is_file());
+        return MACOS.iter().flat_map(|(app, kind)| roots.iter().map(move |root| (root.join(app), *kind))).find(|(path, _)| path.is_file());
     }
     let path = std::env::var_os("PATH")?;
-    LINUX.iter().find_map(|(name, family)| std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file()).map(|p| (p, *family)))
+    LINUX.iter().find_map(|(name, kind)| std::env::split_paths(&path).map(|dir| dir.join(name)).find(|p| p.is_file()).map(|p| (p, *kind)))
 }
 
 pub fn check_url(url: &str) -> Result<reqwest::Url, String> {
@@ -75,11 +97,42 @@ pub fn check_url(url: &str) -> Result<reqwest::Url, String> {
     }
 }
 
-fn chromium_args(profile: &Path, port: u16, url: &str) -> Vec<String> {
-    let mut args: Vec<String> = [
-        format!("--user-data-dir={}", profile.display()),
+pub fn gate_url(request: &str) -> Result<String, String> {
+    let bad = || format!("not a link handed over by claudette's helper: {request}");
+    let (port, token) = request.split_once(' ').ok_or_else(bad)?;
+    let port: u16 = port.parse().ok().filter(|&p| p != 0).ok_or_else(bad)?;
+    if token.len() != 2 * GATE_TOKEN_BYTES || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    Ok(format!("http://127.0.0.1:{port}/{token}"))
+}
+
+fn major_version(text: &str) -> Option<u32> {
+    text.split_whitespace().find(|w| w.contains('.'))?.split('.').next()?.parse().ok()
+}
+
+async fn version(program: &Path) -> Result<u32, String> {
+    let run = tokio::process::Command::new(program).arg("--version").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).output();
+    let output = tokio::time::timeout(VERSION_CHECK, run)
+        .await
+        .map_err(|_| format!("{} did not tell its version within {}s; nothing was opened", program.display(), VERSION_CHECK.as_secs()))?
+        .map_err(|e| format!("could not ask {} for its version: {e}; nothing was opened", program.display()))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    major_version(&text).ok_or_else(|| format!("could not tell which version {} is from {:?}; nothing was opened", program.display(), text.trim()))
+}
+
+fn profile_args(family: Family, profile: &Path) -> Vec<String> {
+    match family {
+        Family::Chromium => vec![format!("--user-data-dir={}", profile.display())],
+        Family::Firefox => vec!["--profile".into(), profile.display().to_string()],
+    }
+}
+
+fn chromium_args(port: u16) -> Vec<String> {
+    [
         format!("--proxy-server=socks5://127.0.0.1:{port}"),
         "--proxy-bypass-list=<-loopback>".into(),
+        "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1".into(),
         "--webrtc-ip-handling-policy=disable_non_proxied_udp".into(),
         "--disable-quic".into(),
         "--disable-background-networking".into(),
@@ -87,19 +140,18 @@ fn chromium_args(profile: &Path, port: u16, url: &str) -> Vec<String> {
         "--disable-sync".into(),
         "--disable-breakpad".into(),
         "--disable-domain-reliability".into(),
-        "--disable-features=MediaRouter,OptimizationHints,NetworkPrediction".into(),
+        "--disable-features=MediaRouter,OptimizationHints".into(),
         "--no-pings".into(),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
-        "--new-window".into(),
+        "--accept-lang=en-US".into(),
+        "--disable-accelerated-2d-canvas".into(),
     ]
-    .into();
-    args.push(url.to_owned());
-    args
+    .into()
 }
 
 fn firefox_prefs(port: u16) -> String {
-    let prefs: [(&str, &str); 31] = [
+    let prefs: [(&str, &str); 35] = [
         ("network.proxy.type", "1"),
         ("network.proxy.socks", "\"127.0.0.1\""),
         ("network.proxy.socks_port", &port.to_string()),
@@ -109,7 +161,8 @@ fn firefox_prefs(port: u16) -> String {
         ("network.proxy.no_proxies_on", "\"\""),
         ("network.proxy.allow_hijacking_localhost", "true"),
         ("network.proxy.failover_direct", "false"),
-        ("network.proxy.share_proxy_settings", "false"),
+        ("network.proxy.allow_bypass", "false"),
+        ("network.dns.disabled", "true"),
         ("network.trr.mode", "5"),
         ("network.dns.disablePrefetch", "true"),
         ("network.prefetch-next", "false"),
@@ -123,6 +176,7 @@ fn firefox_prefs(port: u16) -> String {
         ("browser.safebrowsing.phishing.enabled", "false"),
         ("browser.safebrowsing.downloads.remote.enabled", "false"),
         ("toolkit.telemetry.enabled", "false"),
+        ("toolkit.telemetry.shutdownPingSender.enabled", "false"),
         ("datareporting.healthreport.uploadEnabled", "false"),
         ("datareporting.policy.dataSubmissionEnabled", "false"),
         ("app.normandy.enabled", "false"),
@@ -131,12 +185,41 @@ fn firefox_prefs(port: u16) -> String {
         ("browser.startup.homepage_override.mstone", "\"ignore\""),
         ("browser.aboutwelcome.enabled", "false"),
         ("geo.enabled", "false"),
+        ("privacy.resistFingerprinting", "true"),
+        ("privacy.spoof_english", "2"),
     ];
     prefs.iter().map(|(name, value)| format!("user_pref(\"{name}\", {value});\n")).collect()
 }
 
-fn firefox_args(profile: &Path, url: &str) -> Vec<String> {
-    vec!["--profile".into(), profile.display().to_string(), "--new-window".into(), url.to_owned()]
+struct Launch {
+    args: Vec<String>,
+    env: [(&'static str, &'static str); 1],
+    prefs: Option<String>,
+}
+
+impl Launch {
+    fn new(kind: Kind, profile: &Path, port: u16) -> Launch {
+        let mut args = profile_args(kind.family, profile);
+        match kind.family {
+            Family::Chromium => {
+                args.extend(chromium_args(port));
+                args.extend(kind.extra.iter().map(|s| (*s).to_owned()));
+                Launch { args, env: [("TZ", "UTC")], prefs: None }
+            }
+            Family::Firefox => Launch { args, env: [("MOZ_CRASHREPORTER_DISABLE", "1")], prefs: Some(firefox_prefs(port)) },
+        }
+    }
+
+    fn stamp(&self) -> String {
+        let env = self.env.iter().map(|(name, value)| format!("{name}={value}"));
+        self.args.iter().cloned().chain(env).chain(self.prefs.clone()).collect::<Vec<_>>().join("\n")
+    }
+}
+
+fn running(profile_args: &[String]) -> Result<bool, String> {
+    let marker = format!("{} ", profile_args.join(" "));
+    let out = std::process::Command::new("ps").args(["-ax", "-ww", "-o", "command="]).output().map_err(|e| format!("could not list this machine's processes: {e}; nothing was opened"))?;
+    Ok(String::from_utf8_lossy(&out.stdout).lines().any(|line| line.contains(&marker)))
 }
 
 async fn socks_ready(port: u16) -> bool {
@@ -150,102 +233,137 @@ async fn socks_ready(port: u16) -> bool {
     tokio::time::timeout(PROXY_CHECK, attempt).await.ok().flatten().is_some()
 }
 
+fn saved<T: std::str::FromStr>(profile: &Path, name: &str) -> Option<T> {
+    std::fs::read_to_string(profile.join(name)).ok()?.trim().parse().ok()
+}
+
 fn free_port() -> Result<u16, String> {
     std::net::TcpListener::bind(("127.0.0.1", 0)).and_then(|l| l.local_addr()).map(|a| a.port()).map_err(|e| format!("no free local port for the browser's proxy: {e}"))
 }
 
-fn locked(profile: &Path) -> std::io::Result<Flock<File>> {
-    let file = File::options().create(true).truncate(false).write(true).open(profile.join("claudette-lock"))?;
-    Flock::lock(file, FlockArg::LockExclusive).map_err(|(_, e)| e.into())
+fn fresh_port(profile: &Path) -> Result<u16, String> {
+    let dirs = profile.parent().and_then(|dir| std::fs::read_dir(dir).ok());
+    let others: Vec<u16> = dirs.into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p != profile).filter_map(|p| saved(&p, PROXY_PORT)).collect();
+    for _ in 0..PORT_TRIES {
+        let port = free_port()?;
+        if !others.contains(&port) {
+            return Ok(port);
+        }
+    }
+    Err("no free local port for the browser's proxy that no other remote machine's browser uses".into())
 }
 
-fn join(profile: &Path) -> Result<(), String> {
+fn proxy_pid(profile: &Path, host: &str) -> Option<i32> {
+    let (pid, port) = (saved::<i32>(profile, PROXY_PID)?, saved::<u16>(profile, PROXY_PORT)?);
+    let out = std::process::Command::new("ps").args(["-ww", "-p", &pid.to_string(), "-o", "command="]).output().ok()?;
+    String::from_utf8_lossy(&out.stdout).trim_end().ends_with(&format!(" -D 127.0.0.1:{port} {host}")).then_some(pid)
+}
+
+fn locked(profile: &Path) -> std::io::Result<Flock<File>> {
+    Flock::lock(lock_file(profile)?, FlockArg::LockExclusive).map_err(|(_, e)| e.into())
+}
+
+fn lock_file(profile: &Path) -> std::io::Result<File> {
+    File::options().create(true).truncate(false).write(true).open(profile.join("claudette-lock"))
+}
+
+async fn lock(profile: &Path) -> Result<Flock<File>, String> {
+    let fail = |e: std::io::Error| format!("could not lock {}: {e}", profile.display());
+    let mut file = lock_file(profile).map_err(fail)?;
+    let deadline = tokio::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => return Ok(lock),
+            Err((back, Errno::EWOULDBLOCK)) if tokio::time::Instant::now() < deadline => {
+                file = back;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err((_, Errno::EWOULDBLOCK)) => return Err(format!("another claudette session held {} for over {}s; nothing was opened", profile.display(), LOCK_WAIT.as_secs())),
+            Err((_, e)) => return Err(fail(e.into())),
+        }
+    }
+}
+
+fn join(profile: &Path, host: &str) -> Result<(), String> {
     let mut joined = JOINED.lock().unwrap();
-    if joined.iter().any(|p| p == profile) {
+    if joined.iter().any(|(p, _)| p == profile) {
         return Ok(());
     }
     let fail = |e: std::io::Error| format!("could not record this session in {}: {e}", profile.display());
-    let _lock = locked(profile).map_err(fail)?;
     let dir = profile.join(SESSIONS);
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(fail)?;
     std::fs::write(dir.join(std::process::id().to_string()), "").map_err(fail)?;
-    joined.push(profile.to_owned());
+    joined.push((profile.to_owned(), host.to_owned()));
     Ok(())
 }
 
-fn running(pid: i32) -> bool {
+fn alive(pid: i32) -> bool {
     matches!(kill(Pid::from_raw(pid), None), Ok(()) | Err(Errno::EPERM))
 }
 
 pub fn release() {
-    for profile in JOINED.lock().unwrap().drain(..) {
+    for (profile, host) in JOINED.lock().unwrap().drain(..) {
         let Ok(_lock) = locked(&profile) else { continue };
         let dir = profile.join(SESSIONS);
         let _ = std::fs::remove_file(dir.join(std::process::id().to_string()));
         let mut others = false;
         for pid in std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok()) {
-            if running(pid) {
+            if alive(pid) {
                 others = true;
             } else {
                 let _ = std::fs::remove_file(dir.join(pid.to_string()));
             }
         }
         if !others {
-            stop_proxy(&profile);
+            stop_proxy(&profile, &host);
         }
     }
 }
 
-fn stop_proxy(profile: &Path) {
-    let read = |name| std::fs::read_to_string(profile.join(name)).ok().and_then(|s| s.trim().parse::<i32>().ok());
-    let (Some(pid), Some(port)) = (read(PROXY_PID), read(PROXY_PORT)) else { return };
+fn stop_proxy(profile: &Path, host: &str) {
+    let pid = proxy_pid(profile, host);
     let _ = std::fs::remove_file(profile.join(PROXY_PID));
-    let still_ours = std::process::Command::new("ps")
-        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&format!(" -D 127.0.0.1:{port} ")));
-    if still_ours {
+    if let Some(pid) = pid {
         let _ = killpg(Pid::from_raw(pid), Signal::SIGTERM);
     }
 }
 
 pub struct Browser {
     config: Config,
-    starting: tokio::sync::Mutex<()>,
 }
 
 impl Browser {
     pub fn new(config: Config) -> Browser {
-        Browser { config, starting: tokio::sync::Mutex::new(()) }
+        Browser { config }
     }
 
-    fn profile(&self, family: Family) -> Result<PathBuf, String> {
+    fn profile(&self, kind: Kind) -> Result<PathBuf, String> {
         let host: String = Sha256::digest(self.config.host.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
-        let dir = claudette_dir().join("browser").join(format!("{}-{host}", family.name()));
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
-        Ok(dir)
+        let dir = claudette_dir().join("browser").join(format!("{}-{host}", kind.id));
+        let fail = |e: std::io::Error| format!("could not make {}: {e}", dir.display());
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(fail)?;
+        dir.canonicalize().map_err(fail)
     }
 
-    fn port(profile: &Path) -> Result<u16, String> {
-        let file = profile.join(PROXY_PORT);
-        if let Some(port) = std::fs::read_to_string(&file).ok().and_then(|s| s.trim().parse().ok()) {
+    async fn proxy(&self, profile: &Path, browser_running: bool) -> Result<u16, String> {
+        let host = &self.config.host;
+        let saved_port = saved::<u16>(profile, PROXY_PORT);
+        if let Some(port) = saved_port
+            && proxy_pid(profile, host).is_some()
+            && socks_ready(port).await
+        {
             return Ok(port);
         }
-        let port = free_port()?;
-        std::fs::write(&file, port.to_string()).map_err(|e| format!("could not save the proxy port: {e}"))?;
-        Ok(port)
-    }
-
-    async fn proxy(&self, profile: &Path, port: u16) -> Result<(), String> {
-        let _held = self.starting.lock().await;
-        if socks_ready(port).await {
-            return Ok(());
-        }
+        let port = match saved_port {
+            Some(port) if browser_running => port,
+            _ => fresh_port(profile)?,
+        };
+        std::fs::write(profile.join(PROXY_PORT), port.to_string()).map_err(|e| format!("could not save the proxy port: {e}"))?;
         let mut argv = vec![self.config.ssh[0].clone()];
         argv.extend(["-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-N", "-T"].map(str::to_owned));
         argv.extend(crate::config::BATCH.iter().map(|s| (*s).to_owned()));
         argv.extend(self.config.ssh[1..].iter().cloned());
-        argv.extend(["-D".to_owned(), format!("127.0.0.1:{port}"), self.config.host.clone()]);
+        argv.extend(["-D".to_owned(), format!("127.0.0.1:{port}"), host.clone()]);
         let mut child = tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
             .stdin(Stdio::null())
@@ -262,33 +380,48 @@ impl Browser {
                 if let Some(mut stderr) = child.stderr.take() {
                     let _ = stderr.read_to_string(&mut err).await;
                 }
-                return Err(format!("ssh could not open the browser's proxy to {} ({status}): {}", self.config.host, err.trim()));
+                return Err(format!("ssh could not open the browser's proxy to {host} on local port {port} ({status}): {}", err.trim()));
             }
             if socks_ready(port).await {
-                return std::fs::write(profile.join(PROXY_PID), pid.to_string()).map_err(|e| format!("could not save the proxy's process id: {e}"));
+                std::fs::write(profile.join(PROXY_PID), pid.to_string()).map_err(|e| format!("could not save the proxy's process id: {e}"))?;
+                return Ok(port);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let _ = child.kill().await;
-        Err(format!("the browser's proxy to {} did not start within {}s", self.config.host, PROXY_START.as_secs()))
+        Err(format!("the browser's proxy to {host} did not start within {}s", PROXY_START.as_secs()))
     }
 
-    pub async fn open(&self, url: &str) -> Result<(), String> {
-        let url = check_url(url)?;
-        let (program, family) = find().ok_or("no supported browser on this machine: install Google Chrome, Chromium, Brave, Microsoft Edge or Firefox; nothing was opened")?;
-        let profile = self.profile(family)?;
-        let port = Self::port(&profile)?;
-        join(&profile)?;
-        self.proxy(&profile, port).await?;
-        let args = match family {
-            Family::Chromium => chromium_args(&profile, port, url.as_str()),
-            Family::Firefox => {
-                std::fs::write(profile.join("user.js"), firefox_prefs(port)).map_err(|e| format!("could not write the browser's settings: {e}"))?;
-                firefox_args(&profile, url.as_str())
+    pub async fn open(&self, request: &str) -> Result<(), String> {
+        let url = gate_url(request)?;
+        let host = &self.config.host;
+        let (program, kind) = find().ok_or("no supported browser on this machine: install Google Chrome, Chromium, Brave, Microsoft Edge or Firefox; nothing was opened")?;
+        let version = version(&program).await?;
+        let min = kind.family.min_version();
+        if version < min {
+            return Err(format!("{} {version} can't be kept to {host}'s connection; claudette needs version {min} or later, so nothing was opened", kind.name));
+        }
+        let profile = self.profile(kind)?;
+        let _lock = lock(&profile).await?;
+        join(&profile, host)?;
+        let running = running(&profile_args(kind.family, &profile))?;
+        let port = self.proxy(&profile, running).await?;
+        let launch = Launch::new(kind, &profile, port);
+        let stamp = launch.stamp();
+        if running {
+            if std::fs::read_to_string(profile.join(LAUNCH)).ok().as_deref() != Some(stamp.as_str()) {
+                return Err(format!("the {} window claudette opened for {host} still runs with another version's settings: quit it, then open the link again; nothing was opened", kind.name));
             }
-        };
+        } else {
+            if let Some(prefs) = &launch.prefs {
+                std::fs::write(profile.join("user.js"), prefs).map_err(|e| format!("could not write the browser's settings: {e}"))?;
+            }
+            std::fs::write(profile.join(LAUNCH), &stamp).map_err(|e| format!("could not save the browser's settings: {e}"))?;
+        }
         let mut child = std::process::Command::new(&program)
-            .args(&args)
+            .args(&launch.args)
+            .args(["--new-window", url.as_str()])
+            .envs(launch.env)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -311,5 +444,20 @@ mod tests {
         for bad in ["file:///etc/passwd", "javascript:alert(1)", "chrome://settings", "not a url"] {
             assert!(check_url(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_major_version_comes_from_each_browsers_version_line() {
+        for (line, major) in [
+            ("Google Chrome 158.0.8127.37 ", 158),
+            ("Brave Browser 157.1.99.57", 157),
+            ("Chromium 131.0.6778.85 built on Debian 12.8, running on Debian 12.8", 131),
+            ("Microsoft Edge 104.0.1293.70", 104),
+            ("Mozilla Firefox 128.5.0esr", 128),
+            ("Mozilla Firefox 160.0.1", 160),
+        ] {
+            assert_eq!(major_version(line), Some(major), "{line}");
+        }
+        assert_eq!(major_version("Firefox"), None);
     }
 }

@@ -163,7 +163,7 @@ claude mcp remove docs
 
 辅助程序启动时会从自己的环境中移除 ssh 的变量（`SSH_*`），因此远程 claude 以及辅助程序和 claude 启动的所有程序都看不到 ssh 会话。于是 Claude Code 的行为与在本机桌面上相同：用 `BROWSER` 打开链接，在 macOS 上用 `pbcopy` 而不是 OSC 52 复制。
 
-本次运行的准备脚本会在 `$T.bin` 中写入三个脚本，并把该目录放在 `PATH` 最前面：导出为 `BROWSER` 的 `claudette-browser` 运行 `__helper open <socket> <url>`；`pbcopy` 和 `pbpaste` 分别运行 `__helper copy <socket>` 和 `__helper paste <socket>`。该 socket 转发到本机。请求只有一行：`open <端口> <令牌>`、`copy`（其后是复制的文本）或 `paste`；回复为 `ok`（`paste` 时其后是剪贴板内容）或错误，辅助程序会输出错误并以失败状态退出。本机的剪贴板在 macOS 上是 `pbcopy` 和 `pbpaste`，在 Linux 上，Wayland 会话使用 wl-clipboard，X11 会话使用 xclip 或 xsel。
+本次运行的准备脚本会在 `$T.bin` 中写入三个脚本，并把该目录放在 `PATH` 最前面：导出为 `BROWSER` 的 `claudette-browser` 运行 `__helper open <socket> <url>`；`pbcopy` 和 `pbpaste` 分别运行 `__helper copy <socket>` 和 `__helper paste <socket>`。该 socket 转发到本机。请求只有一行：`open <端口> <令牌> <时区>`、`copy`（其后是复制的文本）或 `paste`；回复为 `ok`（`paste` 时其后是剪贴板内容）或错误，辅助程序会输出错误并以失败状态退出。本机的剪贴板在 macOS 上是 `pbcopy` 和 `pbpaste`，在 Linux 上，Wayland 会话使用 wl-clipboard，X11 会话使用 xclip 或 xsel。
 
 只会打开 `http` 和 `https` 链接，而且链接本身从不到达本机。辅助程序在远程机器的 `127.0.0.1` 上监听一个空闲端口，并把该端口、一个 32 位的随机令牌和远程机器的时区（取自 `TZ`、`/etc/localtime` 或 `/etc/timezone`，否则为 UTC）发给本机；本机在浏览器中打开 `http://127.0.0.1:<端口>/<令牌>`。只有流量（包括回环地址）经由远程机器的浏览器才能访问这个地址，辅助程序用重定向到该链接作为回应。如果 30 秒内没有浏览器来访问，辅助程序就以失败退出，因此无论是因为版本、策略，还是窗口被另一个实例接管，不走代理的浏览器都拿不到链接。
 

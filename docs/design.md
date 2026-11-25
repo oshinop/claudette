@@ -377,10 +377,10 @@ does at a desk: it opens links with `BROWSER` and, on macOS, copies with `pbcopy
 The run's setup writes three scripts to `$T.bin`, which goes first on `PATH`: `claudette-browser`,
 exported as `BROWSER`, runs `__helper open <socket> <url>`; `pbcopy` and `pbpaste` run
 `__helper copy <socket>` and `__helper paste <socket>`. The socket is forwarded to this machine. A
-request is one line, `open <port> <token>`, `copy` (the copied text follows) or `paste`, and the
-answer is `ok` (then the clipboard, for `paste`) or the error, which the helper prints before
-failing. The clipboard here is `pbcopy` and `pbpaste` on macOS, and on Linux wl-clipboard in a
-Wayland session or xclip or xsel in an X11 one.
+request is one line, `open <port> <token> <time zone>`, `copy` (the copied text follows) or
+`paste`, and the answer is `ok` (then the clipboard, for `paste`) or the error, which the helper
+prints before failing. The clipboard here is `pbcopy` and `pbpaste` on macOS, and on Linux
+wl-clipboard in a Wayland session or xclip or xsel in an X11 one.
 
 Only `http` and `https` links open, and the link itself never reaches this machine. The helper
 listens on a free port of the remote machine's `127.0.0.1` and sends that port, a random 32-digit

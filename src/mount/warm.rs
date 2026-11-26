@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures_util::FutureExt;
@@ -141,6 +141,7 @@ fn encode<H: Handler>(handler: &mut H, plan: &Plan, paths: Option<&PathParts>) -
     };
     lstat(handler, &mut out, "/");
     let mut budget = CONTENT_BUDGET;
+    let mut packed = HashSet::new();
     let mut folders: VecDeque<(String, bool)> = plan.list.iter().map(|p| ((*p).to_owned(), false)).chain(plan.tree.iter().map(|p| ((*p).to_owned(), true))).collect();
     let mut listed = 0;
     while let Some((dir, descend)) = folders.pop_front() {
@@ -171,6 +172,7 @@ fn encode<H: Handler>(handler: &mut H, plan: &Plan, paths: Option<&PathParts>) -
                 && let Some(data) = read_all(handler, &path, FILE_MAX)
             {
                 budget -= data.len().min(budget);
+                packed.insert(path.clone());
                 out.put_u8(CONTENT);
                 put_str(&mut out, path.as_bytes());
                 put_str(&mut out, &data);
@@ -179,9 +181,13 @@ fn encode<H: Handler>(handler: &mut H, plan: &Plan, paths: Option<&PathParts>) -
     }
     let mut named = NAMED_FILE_MAX;
     for path in &plan.files {
+        if packed.contains(path.as_str()) {
+            continue;
+        }
         if lstat(handler, &mut out, path).is_some_and(|a| a.is_regular() && a.len() <= named)
             && let Some(data) = read_all(handler, path, named)
         {
+            packed.insert(path.clone());
             named -= data.len() as u64;
             out.put_u8(CONTENT);
             put_str(&mut out, path.as_bytes());
@@ -278,9 +284,11 @@ mod tests {
         std::fs::write(dir.join(".claude/big.bin"), vec![0u8; (FILE_MAX + 1) as usize]).unwrap();
         std::fs::write(dir.join("src/a.rs"), "fn a() {}").unwrap();
         let mut project = crate::mount::sftp::Project::new(&dir, None, false).unwrap();
-        let plan = Plan { list: &["/"], tree: &["/.claude"], files: vec!["/src/a.rs".into(), "/nope".into()] };
+        let plan = Plan { list: &["/"], tree: &["/.claude"], files: vec!["/.claude/skills/s/SKILL.md".into(), "/src/a.rs".into(), "/nope".into()] };
         let parts = PathParts { workdir: "w".into(), local: "l".into(), sessions_local: "s".into(), user_local: "u".into() };
         let warm = Warm::decode(&snapshot(&mut project, &plan, Some(&parts))).unwrap();
+
+        assert_eq!(warm.contents.iter().filter(|(p, _)| p == "/.claude/skills/s/SKILL.md").count(), 1);
 
         assert_eq!(warm.paths, Some(parts));
         assert!(warm.version.is_some());

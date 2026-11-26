@@ -442,7 +442,7 @@ pub struct UserContent {
 
 enum Entry {
     Virtual(Vec<String>),
-    Real(PathBuf),
+    Real { path: PathBuf, root: PathBuf, claude_dir: PathBuf, top: PathBuf, at_top: bool },
 }
 
 impl UserContent {
@@ -455,7 +455,42 @@ impl UserContent {
         USER_CONTENT.iter().filter(|n| self.dir.join(n).is_dir()).map(|n| (*n).to_owned()).collect()
     }
 
-    fn entry(&self, path: &str, follow: bool) -> Result<Entry, StatusCode> {
+    /// Returns virtual paths of top-level skill `SKILL.md` and agent/command/output-style markdown
+    /// files so `warm::snapshot` guarantees they are cached even past the tree content budget.
+    pub fn warm_files(&self) -> Vec<String> {
+        let Ok(claude_dir) = self.dir.canonicalize() else { return vec![] };
+        let mut files = vec![];
+        for folder in USER_CONTENT {
+            let Ok(top) = self.dir.join(folder).canonicalize() else { continue };
+            let Ok(entries) = std::fs::read_dir(&top) else { continue };
+            for entry in entries.flatten() {
+                let child = entry.path();
+                let Ok(target) = child.canonicalize() else { continue };
+                if !Self::allowed_top_target(&target, &claude_dir, &top) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if folder == "skills" {
+                    if target.join("SKILL.md").canonicalize().is_ok_and(|p| p.starts_with(&target) && p.is_file()) {
+                        files.push(format!("/.claude/skills/{name}/SKILL.md"));
+                    }
+                } else if name.ends_with(".md") && target.is_file() {
+                    files.push(format!("/.claude/{folder}/{name}"));
+                }
+            }
+        }
+        files
+    }
+
+    /// Returns whether a symlink directly inside a `USER_CONTENT` folder may be dereferenced.
+    /// Targets outside `~/.claude` (e.g. `~/.agents/skills/*`) or within the same folder are allowed;
+    /// targets elsewhere inside `~/.claude` (e.g. `.credentials.json`, `settings.json`) stay hidden.
+    fn allowed_top_target(target: &Path, claude_dir: &Path, top: &Path) -> bool {
+        !target.starts_with(claude_dir) || target.starts_with(top)
+    }
+
+    fn entry(&self, path: &str) -> Result<Entry, StatusCode> {
         let mut parts: Vec<String> = vec![];
         for component in Path::new(path).components() {
             match component {
@@ -470,17 +505,27 @@ impl UserContent {
             [] => Ok(Entry::Virtual(vec![".claude".into()])),
             [claude] if claude == ".claude" => Ok(Entry::Virtual(self.present())),
             [claude, folder, rest @ ..] if claude == ".claude" && USER_CONTENT.contains(&folder.as_str()) => {
+                let claude_dir = self.dir.canonicalize().map_err(|e| io_status(&e))?;
                 let top = self.dir.join(folder).canonicalize().map_err(|e| io_status(&e))?;
                 if rest.is_empty() {
-                    return Ok(Entry::Real(top));
+                    return Ok(Entry::Real { path: top.clone(), root: top.clone(), claude_dir, top, at_top: true });
                 }
-                let local = rest.iter().fold(top.clone(), |p, part| p.join(part));
-                let check = if follow { local.canonicalize() } else { local.parent().map_or(Ok(top.clone()), Path::canonicalize) };
-                let check = check.map_err(|e| io_status(&e))?;
-                if !check.starts_with(&top) {
+                let head = top.join(&rest[0]);
+                let root = if std::fs::symlink_metadata(&head).map_err(|e| io_status(&e))?.file_type().is_symlink() {
+                    let target = head.canonicalize().map_err(|e| io_status(&e))?;
+                    if !Self::allowed_top_target(&target, &claude_dir, &top) {
+                        return Err(StatusCode::NoSuchFile);
+                    }
+                    target
+                } else {
+                    top.clone()
+                };
+                let candidate = rest[1..].iter().fold(head, |p, part| p.join(part));
+                let resolved = candidate.canonicalize().map_err(|e| io_status(&e))?;
+                if !resolved.starts_with(&root) {
                     return Err(StatusCode::NoSuchFile);
                 }
-                Ok(Entry::Real(local))
+                Ok(Entry::Real { path: resolved, root, claude_dir, top, at_top: false })
             }
             _ => Err(StatusCode::NoSuchFile),
         }
@@ -490,13 +535,10 @@ impl UserContent {
         read_only(meta)
     }
 
-    fn stat_entry(&self, path: &str, follow: bool) -> Result<FileAttributes, StatusCode> {
-        match self.entry(path, follow)? {
+    fn stat_entry(&self, path: &str) -> Result<FileAttributes, StatusCode> {
+        match self.entry(path)? {
             Entry::Virtual(_) => std::fs::metadata(&self.dir).map(|m| self.attrs(&m)).map_err(|e| io_status(&e)),
-            Entry::Real(local) => {
-                let meta = if follow { std::fs::metadata(&local) } else { std::fs::symlink_metadata(&local) };
-                meta.map(|m| self.attrs(&m)).map_err(|e| io_status(&e))
-            }
+            Entry::Real { path: local, .. } => std::fs::metadata(&local).map(|m| self.attrs(&m)).map_err(|e| io_status(&e)),
         }
     }
 
@@ -532,12 +574,12 @@ impl russh_sftp::server::Handler for UserContent {
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         note("user stat", &path);
-        Ok(Attrs { id, attrs: self.stat_entry(&path, true)? })
+        Ok(Attrs { id, attrs: self.stat_entry(&path)? })
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         note("user lstat", &path);
-        Ok(Attrs { id, attrs: self.stat_entry(&path, false)? })
+        Ok(Attrs { id, attrs: self.stat_entry(&path)? })
     }
 
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
@@ -549,7 +591,7 @@ impl russh_sftp::server::Handler for UserContent {
 
     async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
         note("user readlink", &path);
-        let Entry::Real(local) = self.entry(&path, false)? else { return Err(StatusCode::Failure) };
+        let Entry::Real { path: local, .. } = self.entry(&path)? else { return Err(StatusCode::Failure) };
         let target = std::fs::read_link(&local).map_err(|e| io_status(&e))?;
         Ok(Name { id, files: vec![File::dummy(target.to_string_lossy())] })
     }
@@ -559,7 +601,7 @@ impl russh_sftp::server::Handler for UserContent {
         if pflags.intersects(OpenFlags::WRITE | OpenFlags::APPEND | OpenFlags::CREATE | OpenFlags::TRUNCATE) {
             return Err(StatusCode::PermissionDenied);
         }
-        let Entry::Real(local) = self.entry(&filename, true)? else { return Err(StatusCode::Failure) };
+        let Entry::Real { path: local, .. } = self.entry(&filename)? else { return Err(StatusCode::Failure) };
         let file = FsFile::open(&local).map_err(|e| io_status(&e))?;
         Ok(Handle { id, handle: self.handle(Open::File(file)) })
     }
@@ -583,15 +625,29 @@ impl russh_sftp::server::Handler for UserContent {
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
         note("user opendir", &path);
-        let files = match self.entry(&path, true)? {
+        let files = match self.entry(&path)? {
             Entry::Virtual(names) => {
-                let attrs = self.stat_entry("/", true)?;
+                let attrs = self.stat_entry("/")?;
                 names.into_iter().map(|n| File::new(n, attrs.clone())).collect()
             }
-            Entry::Real(local) => std::fs::read_dir(&local)
+            Entry::Real { path: local, root, claude_dir, top, at_top } => std::fs::read_dir(&local)
                 .map_err(|e| io_status(&e))?
                 .flatten()
-                .filter_map(|e| std::fs::symlink_metadata(e.path()).ok().map(|m| File::new(e.file_name().to_string_lossy(), self.attrs(&m))))
+                .filter_map(|e| {
+                    let child = e.path();
+                    let meta = std::fs::symlink_metadata(&child).ok()?;
+                    let meta = if meta.file_type().is_symlink() {
+                        let target = child.canonicalize().ok()?;
+                        let allowed = if at_top { Self::allowed_top_target(&target, &claude_dir, &top) } else { target.starts_with(&root) };
+                        if !allowed {
+                            return None;
+                        }
+                        std::fs::metadata(&target).ok()?
+                    } else {
+                        meta
+                    };
+                    Some(File::new(e.file_name().to_string_lossy(), self.attrs(&meta)))
+                })
                 .collect(),
         };
         Ok(Handle { id, handle: self.handle(Open::Dir(files)) })
@@ -1272,6 +1328,58 @@ mod tests {
         assert_eq!(u.open(8, "/.claude/skills/new.md".into(), create(), FileAttributes::empty()).await.err(), Some(StatusCode::PermissionDenied));
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_file(outside).unwrap();
+    }
+
+    #[tokio::test]
+    async fn symlinked_skills_and_commands_are_dereferenced_without_exposing_claude_internals() {
+        let base = std::env::temp_dir().join(format!("ct-user-links-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = base.join("home/.claude");
+        let shared = base.join("home/.agents/skills/shared");
+        let commands = base.join("shared-commands");
+        let secret = base.join("outside-secret");
+        for d in [&dir.join("skills"), &dir.join("commands"), &shared, &commands] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(shared.join("SKILL.md"), "shared-skill").unwrap();
+        std::fs::write(commands.join("review.md"), "shared-command").unwrap();
+        std::fs::write(dir.join(".credentials.json"), "secret").unwrap();
+        std::fs::write(&secret, "secret").unwrap();
+
+        std::os::unix::fs::symlink("../../.agents/skills/shared", dir.join("skills/shared")).unwrap();
+        std::os::unix::fs::symlink(commands.join("review.md"), dir.join("commands/review.md")).unwrap();
+        std::os::unix::fs::symlink(&secret, shared.join("leak")).unwrap();
+        std::os::unix::fs::symlink(dir.join(".credentials.json"), dir.join("skills/creds")).unwrap();
+        std::os::unix::fs::symlink(base.join("missing"), dir.join("skills/dangling")).unwrap();
+
+        let mut u = UserContent::new(&dir).unwrap();
+        let names = |files: Vec<File>| {
+            let mut v: Vec<(String, bool, bool)> = files.into_iter().map(|f| (f.filename, f.attrs.is_dir(), f.attrs.is_regular())).collect();
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v
+        };
+        let skills = u.opendir(1, "/.claude/skills".into()).await.unwrap().handle;
+        assert_eq!(names(u.readdir(2, skills).await.unwrap().files), [("shared".into(), true, false)]);
+        let shared_dir = u.opendir(3, "/.claude/skills/shared".into()).await.unwrap().handle;
+        assert_eq!(names(u.readdir(4, shared_dir).await.unwrap().files), [("SKILL.md".into(), false, true)]);
+
+        let lstat_dir = u.lstat(5, "/.claude/skills/shared".into()).await.unwrap().attrs;
+        assert!(lstat_dir.is_dir() && !lstat_dir.is_symlink());
+        let lstat_cmd = u.lstat(6, "/.claude/commands/review.md".into()).await.unwrap().attrs;
+        assert!(lstat_cmd.is_regular() && !lstat_cmd.is_symlink());
+
+        let h = u.open(7, "/.claude/skills/shared/SKILL.md".into(), READ, FileAttributes::empty()).await.unwrap().handle;
+        assert_eq!(u.read(8, h, 0, 100).await.unwrap().data, b"shared-skill");
+        let h2 = u.open(9, "/.claude/commands/review.md".into(), READ, FileAttributes::empty()).await.unwrap().handle;
+        assert_eq!(u.read(10, h2, 0, 100).await.unwrap().data, b"shared-command");
+
+        for blocked in ["/.claude/skills/shared/leak", "/.claude/skills/creds", "/.claude/skills/dangling"] {
+            assert_eq!(u.lstat(11, blocked.into()).await.err(), Some(StatusCode::NoSuchFile), "{blocked}");
+            assert_eq!(u.open(12, blocked.into(), READ, FileAttributes::empty()).await.err(), Some(StatusCode::NoSuchFile), "{blocked}");
+        }
+        let mut warm_files = u.warm_files();
+        warm_files.sort();
+        assert_eq!(warm_files, ["/.claude/commands/review.md", "/.claude/skills/shared/SKILL.md"]);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[tokio::test]

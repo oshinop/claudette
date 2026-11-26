@@ -101,3 +101,22 @@ a pull request needs.
 Bump the version in `Cargo.toml` and `Cargo.lock`, commit `chore: release X.Y.Z`, wait for CI, then
 push the tag `vX.Y.Z`. Before 1.0, a release that adds features or changes behavior users may rely
 on bumps the minor version; fixes alone bump the patch.
+
+## Code Review Rules
+
+### Traffic from the local machine
+- Flag a change that makes claudette on the local machine connect anywhere other than the remote
+  machine over ssh, GitHub releases (or `CLAUDETTE_DOWNLOAD_URL`) for update checks, and MCP servers
+  the user set to run locally, with their OAuth sign-in. The link browser reaches the network only
+  through the remote machine; flag any path that lets it connect directly or starts it when one of
+  its protections can't be applied.
+
+### What reaches the remote machine
+- Flag local state reaching the remote machine beyond what `docs/design.md` describes, environment
+  variables forwarded beyond what `forward_env` and `forward_claude_env` select, and forwarded values
+  placed on the remote command line.
+
+### Matching Claude Code
+- Flag a change that makes `claude` through claudette differ from a local Claude Code in arguments,
+  output, files written or exit status, unless `docs/limitations.md` records the difference. Flag
+  anything claudette prints into Claude Code's interface while it runs.

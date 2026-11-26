@@ -143,7 +143,8 @@ impl SocketHub {
     pub fn serve_user_content(&self, forwards: &mut Forwards) -> anyhow::Result<Option<String>> {
         let dir = crate::settings::user_dir();
         let Some(mut content) = sftp::UserContent::new(&dir) else { return Ok(None) };
-        forwards.file("user.warm", warm::snapshot(&mut content, &warm::Plan { tree: &["/"], ..Default::default() }, None));
+        let plan = warm::Plan { tree: &["/"], files: content.warm_files(), ..Default::default() };
+        forwards.file("user.warm", warm::snapshot(&mut content, &plan, None));
         let (path, listener) = self.listen()?;
         self.spawn(async move {
             while let Ok((conn, _)) = listener.accept().await {
